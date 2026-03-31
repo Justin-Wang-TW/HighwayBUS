@@ -74,6 +74,7 @@
       const [saveStatus, setSaveStatus] = useState(null);
       const [isLoading, setIsLoading] = useState(true);
       const [user, setUser] = useState(null);
+      const [zoomScale, setZoomScale] = useState(1); // 1 = 100%, 2 = 200%
       
       const [draggingTrip, setDraggingTrip] = useState(null); 
       const timelineRef = useRef(null);
@@ -103,7 +104,7 @@
                 setUser(currentUser);
                 if(currentUser) {
                   try {
-                    const docRef = fb.doc(db, 'artifacts', window.__app_id, 'public', 'data', 'schedules', 'current-daily-v3');
+                    const docRef = fb.doc(db, 'artifacts', window.__app_id, 'public', 'data', 'schedules', 'current-daily-v4');
                     const snap = await fb.getDoc(docRef);
                     if(snap.exists()) { setDailyTrips(snap.data().trips); } 
                     else { optimizeSchedule(true); }
@@ -125,7 +126,7 @@
         }
         setSaveStatus("儲存中...");
         try {
-          const docRef = window.fb.doc(window.db, 'artifacts', window.__app_id, 'public', 'data', 'schedules', 'current-daily-v3');
+          const docRef = window.fb.doc(window.db, 'artifacts', window.__app_id, 'public', 'data', 'schedules', 'current-daily-v4');
           await window.fb.setDoc(docRef, { trips: dailyTrips, updatedAt: window.fb.serverTimestamp() });
           setSaveStatus("✅ 雲端儲存成功！");
         } catch (error) { setSaveStatus("❌ 儲存失敗"); }
@@ -142,24 +143,18 @@
           { route: 'kouhu', bus: 1, hours: [6, 10, 14, 18] },
           { route: 'mailiao', bus: 1, hours: [6, 10, 14, 18] },
         ];
-
         const genId = () => Math.random().toString(36).substr(2, 9);
-
         configs.forEach(config => {
           const routeInfo = routesData.find(r => r.id === config.route);
           const busId = `${routeInfo.name}-車${config.bus}`;
           const isOutstationBase = (config.route === 'minxiong' && config.bus === 2);
-          
-          let earlyTrips = [];
-          let lateTrips = [];
-
+          let earlyTrips = []; let lateTrips = [];
           config.hours.forEach(h => {
             const startMins = h * 60 + (config.route === 'douliu' && (h===11||h===19) ? -30 : 0);
             const duration = routeInfo.duration;
             const restMins = routeInfo.destRestMins;
             const isEarly = startMins < 14 * 60;
             const targetArray = isEarly ? earlyTrips : lateTrips;
-
             if (isOutstationBase) {
               targetArray.push({ tripId: genId(), startMins: startMins, duration, direction: 'inbound' });
               targetArray.push({ tripId: genId(), startMins: startMins + duration + restMins, duration, direction: 'outbound' });
@@ -168,13 +163,11 @@
               targetArray.push({ tripId: genId(), startMins: startMins + duration + restMins, duration, direction: 'inbound' });
             }
           });
-
           if (earlyTrips.length > 0) allSchedules.push({ rowId: `${busId}-早班`, busId, driverType: '早班', routeId: config.route, trips: earlyTrips });
           if (lateTrips.length > 0) allSchedules.push({ rowId: `${busId}-晚班`, busId, driverType: '晚班', routeId: config.route, trips: lateTrips });
         });
-        
         setDailyTrips(allSchedules);
-        if(!isInit) { setSaveStatus("已重置為標準排班！"); setTimeout(() => setSaveStatus(null), 3000); }
+        if(!isInit) { setSaveStatus("已重置排班！"); setTimeout(() => setSaveStatus(null), 3000); }
       };
 
       const addTrip = (rowId) => {
@@ -182,17 +175,12 @@
           if (row.rowId !== rowId) return row;
           const routeInfo = routesData.find(r => r.id === row.routeId);
           const lastTrip = row.trips[row.trips.length - 1];
-          let newDirection = 'outbound';
-          let newStartMins = 480;
-
+          let newDirection = 'outbound'; let newStartMins = 480;
           if (lastTrip) {
              newDirection = lastTrip.direction === 'outbound' ? 'inbound' : 'outbound';
              const restMins = lastTrip.direction === 'outbound' ? routeInfo.destRestMins : 15;
              newStartMins = lastTrip.startMins + lastTrip.duration + restMins;
-          } else if (row.rowId.includes('車2')) {
-             newDirection = 'inbound';
-          }
-
+          } else if (row.rowId.includes('車2')) { newDirection = 'inbound'; }
           return {
             ...row,
             trips: [...row.trips, {
@@ -215,73 +203,37 @@
       const toggleDirection = (rowId, tripId) => {
         setDailyTrips(prev => prev.map(row => {
           if (row.rowId !== rowId) return row;
-          return {
-            ...row,
-            trips: row.trips.map(t => t.tripId === tripId ? { ...t, direction: t.direction === 'outbound' ? 'inbound' : 'outbound' } : t)
-          };
+          return { ...row, trips: row.trips.map(t => t.tripId === tripId ? { ...t, direction: t.direction === 'outbound' ? 'inbound' : 'outbound' } : t) };
         }));
       };
 
-      // --- 衍生資料與法規稽核 ---
       const processedSchedule = useMemo(() => {
         return dailyTrips.map(row => {
-          let violations = [];
-          let currentContinuousDrive = 0;
-          let totalDriveMins = 0;
-          let rests = []; // 儲存視覺化休息區塊
-
+          let violations = []; let currentContinuousDrive = 0; let totalDriveMins = 0; let rests = [];
           const trips = row.trips.map((trip, idx) => {
             const endMins = trip.startMins + trip.duration;
-            const isFirst = idx === 0;
-            const isLast = idx === row.trips.length - 1;
-
             if (idx > 0) {
               const prevTrip = row.trips[idx - 1];
               const prevEndMins = prevTrip.startMins + prevTrip.duration;
               const gap = trip.startMins - prevEndMins;
-              
               if (gap >= 30) currentContinuousDrive = 0;
-              if (prevTrip.direction === trip.direction && !violations.includes('行駛動線不連續')) {
-                 violations.push('行駛動線不連續');
-              }
-
-              // 休息區塊判定
-              if (gap >= 15) {
-                rests.push({
-                  startMins: prevEndMins,
-                  duration: gap,
-                  type: gap >= 30 ? 'large' : 'small'
-                });
-              }
+              if (prevTrip.direction === trip.direction && !violations.includes('動線不連續')) violations.push('動線不連續');
+              if (gap >= 15) rests.push({ startMins: prevEndMins, endMins: trip.startMins, duration: gap, type: gap >= 30 ? 'large' : 'small' });
             }
-
-            currentContinuousDrive += trip.duration;
-            totalDriveMins += trip.duration;
-
-            if (currentContinuousDrive > 240 && !violations.includes('連續駕駛超過4小時未休滿30分鐘')) {
-               violations.push('連續駕駛超過4小時未休滿30分鐘');
-            }
-
-            return {
-              ...trip,
-              endMins, isFirst, isLast,
-              startTimeStr: minsToTime(trip.startMins),
-              endTimeStr: minsToTime(endMins)
-            };
+            currentContinuousDrive += trip.duration; totalDriveMins += trip.duration;
+            if (currentContinuousDrive > 240 && !violations.includes('連續駕駛超標')) violations.push('連續駕駛超標');
+            return { ...trip, endMins, isFirst: idx === 0, isLast: idx === row.trips.length - 1, startTimeStr: minsToTime(trip.startMins), endTimeStr: minsToTime(endMins) };
           });
-
-          let isOutstationStart = trips.length > 0 ? trips[0].direction === 'inbound' : false;
-          let isOutstationEnd = trips.length > 0 ? trips[trips.length - 1].direction === 'outbound' : false;
-
+          const isOutstationStart = trips.length > 0 ? trips[0].direction === 'inbound' : false;
+          const isOutstationEnd = trips.length > 0 ? trips[trips.length - 1].direction === 'outbound' : false;
           if (trips.length > 0) {
             const startTime = trips[0].startMins - 15;
             const endTime = trips[trips.length - 1].endMins + 15;
             const totalWorkMins = endTime - startTime;
-            if (totalWorkMins > 600 && !violations.includes('總工作時間超過10小時')) violations.push('總工作時間超過10小時');
-            if (totalWorkMins > 720) violations.push('單日總工時超過 12 小時');
-            if (totalDriveMins > 600) violations.push('單日行車時間超過 10 小時');
+            if (totalWorkMins > 600 && !violations.includes('總工時超10H')) violations.push('總工時超10H');
+            if (totalWorkMins > 720) violations.push('總工時超12H');
+            if (totalDriveMins > 600) violations.push('純行車超10H');
           }
-
           return { ...row, trips, rests, isOutstationStart, isOutstationEnd, violations, isLegal: violations.length === 0 };
         });
       }, [dailyTrips]);
@@ -289,29 +241,24 @@
       const rosterData = useMemo(() => {
         const earlyShifts = processedSchedule.filter(s => s.driverType === '早班');
         const lateShifts = processedSchedule.filter(s => s.driverType === '晚班');
-        const earlyDriversCount = Math.ceil(earlyShifts.length * 1.4);
-        const lateDriversCount = Math.ceil(lateShifts.length * 1.4);
-        const earlyDrivers = Array.from({length: earlyDriversCount}, (_, i) => `駕駛${String(i+1).padStart(2, '0')}號`);
-        const lateDrivers = Array.from({length: lateDriversCount}, (_, i) => `駕駛${String(earlyDriversCount + i + 1).padStart(2, '0')}號`);
         const staffMembers = ['站務01號', '站務02號', '站務03號'];
         const monthlyRoster = [];
         for (let day = 1; day <= 30; day++) {
           const assignments = {};
           assignments['站務-早班'] = staffMembers[(day) % 3];
           assignments['站務-晚班'] = staffMembers[(day + 1) % 3];
-          earlyShifts.forEach((s, i) => assignments[s.rowId] = earlyDrivers[(day + i) % earlyDrivers.length]);
-          lateShifts.forEach((s, i) => assignments[s.rowId] = lateDrivers[(day + i) % lateDrivers.length]);
+          earlyShifts.forEach((s, i) => assignments[s.rowId] = `駕駛E${String((day+i)%10+1).padStart(2,'0')}`);
+          lateShifts.forEach((s, i) => assignments[s.rowId] = `駕駛L${String((day+i)%10+1).padStart(2,'0')}`);
           monthlyRoster.push({ day, assignments });
         }
         return { monthlyRoster, earlyShifts, lateShifts };
       }, [processedSchedule]);
 
-      // --- 拖拽處理 (含重疊限制) ---
+      // --- 拖拽處理 ---
       const handleMouseDown = (e, rowId, tripId, currentStartMins) => {
         setDraggingTrip({ rowId, tripId, initialMouseX: e.clientX, initialStartMins: currentStartMins });
         document.body.style.cursor = 'grabbing';
       };
-
       const handleMouseMove = (e) => {
         if (!draggingTrip || !timelineRef.current) return;
         const timelineRect = timelineRef.current.getBoundingClientRect();
@@ -320,30 +267,17 @@
         const deltaX = e.clientX - draggingTrip.initialMouseX;
         const snappedDeltaMins = Math.round((deltaX / pixelsPerMin) / 5) * 5;
         let newStartMins = draggingTrip.initialStartMins + snappedDeltaMins;
-
         setDailyTrips(prev => prev.map(row => {
           if (row.rowId !== draggingTrip.rowId) return row;
-          const tripIdx = row.trips.findIndex(t => t.tripId === draggingTrip.tripId);
-          const t = row.trips[tripIdx];
-          
-          // 重疊防止邊界
-          const prevTrip = row.trips[tripIdx - 1];
-          const nextTrip = row.trips[tripIdx + 1];
-          let minAllowed = 345;
-          let maxAllowed = 1440 - t.duration - 15;
-
-          if (prevTrip) minAllowed = prevTrip.startMins + prevTrip.duration;
-          if (nextTrip) maxAllowed = nextTrip.startMins - t.duration;
-
-          const finalStartMins = Math.max(minAllowed, Math.min(newStartMins, maxAllowed));
-
-          return { 
-            ...row, 
-            trips: row.trips.map((trip, i) => i === tripIdx ? { ...trip, startMins: finalStartMins } : trip)
-          };
+          const idx = row.trips.findIndex(t => t.tripId === draggingTrip.tripId);
+          const t = row.trips[idx];
+          const prevT = row.trips[idx - 1]; const nextT = row.trips[idx + 1];
+          let minAllowed = 345; let maxAllowed = 1440 - t.duration - 15;
+          if (prevT) minAllowed = prevT.startMins + prevT.duration;
+          if (nextT) maxAllowed = nextT.startMins - t.duration;
+          return { ...row, trips: row.trips.map((trip, i) => i === idx ? { ...trip, startMins: Math.max(minAllowed, Math.min(newStartMins, maxAllowed)) } : trip) };
         }));
       };
-
       useEffect(() => {
         const up = () => { setDraggingTrip(null); document.body.style.cursor = 'default'; };
         if (draggingTrip) { window.addEventListener('mousemove', handleMouseMove); window.addEventListener('mouseup', up); }
@@ -352,108 +286,135 @@
 
       // --- 視圖渲染 ---
       const renderDailyView = () => {
-        if (isLoading) return <div className="p-20 text-center font-bold text-gray-400">連線中...</div>;
+        if (isLoading) return <div className="p-20 text-center font-bold text-gray-400">系統初始化中...</div>;
         const TIMELINE_START = 330; const TIMELINE_END = 1440; const TIMELINE_TOTAL = TIMELINE_END - TIMELINE_START;
         const timeMarkers = Array.from({length: 19}, (_, i) => `${String(i + 6).padStart(2, '0')}:00`);
         
         return (
           <div className="space-y-6 animate-fadeIn select-none">
-            <div className="flex justify-between items-center bg-white p-4 rounded-xl shadow-sm border border-gray-100">
-               <div className="flex space-x-3">
-                 <button onClick={handleSave} className="px-6 py-2 bg-indigo-600 text-white font-bold rounded-lg hover:bg-indigo-700 transition-all shadow-md flex items-center">儲存排班</button>
-                 <button onClick={() => optimizeSchedule()} className="px-6 py-2 bg-gray-200 text-gray-700 font-bold rounded-lg hover:bg-gray-300">重置最佳化</button>
+            {/* 工具列 */}
+            <div className="flex justify-between items-center bg-white p-4 rounded-xl shadow-sm border border-gray-100 sticky top-0 z-50">
+               <div className="flex items-center space-x-3">
+                 <button onClick={handleSave} className="px-6 py-2 bg-indigo-600 text-white font-bold rounded-lg hover:bg-indigo-700 transition-all shadow-md">儲存排班</button>
+                 <button onClick={() => optimizeSchedule()} className="px-4 py-2 bg-gray-100 text-gray-600 font-bold rounded-lg hover:bg-gray-200">最佳化</button>
+                 
+                 <div className="h-6 w-px bg-gray-200 mx-2"></div>
+                 
+                 <div className="flex items-center bg-gray-100 rounded-lg p-1">
+                   <button onClick={() => setZoomScale(Math.max(1, zoomScale - 0.25))} className="w-10 h-8 flex items-center justify-center font-bold text-gray-600 hover:bg-white rounded transition-colors" title="縮小 (Zoom Out)">－</button>
+                   <span className="px-3 text-xs font-black text-gray-500 w-16 text-center">{Math.round(zoomScale * 100)}%</span>
+                   <button onClick={() => setZoomScale(Math.min(3, zoomScale + 0.25))} className="w-10 h-8 flex items-center justify-center font-bold text-gray-600 hover:bg-white rounded transition-colors" title="放大 (Zoom In)">＋</button>
+                 </div>
                </div>
-               {saveStatus && <div className="text-indigo-700 font-bold bg-indigo-50 px-4 py-2 rounded-lg border border-indigo-100">{saveStatus}</div>}
+               {saveStatus && <div className="text-indigo-700 font-bold px-4 py-2 rounded-lg border border-indigo-100 bg-indigo-50 animate-pulse">{saveStatus}</div>}
             </div>
 
-            <div className="bg-white rounded-xl shadow-md overflow-hidden">
-              <div className="p-4 border-b border-gray-200 bg-gray-50 flex flex-col">
-                <div className="flex flex-wrap gap-4 mb-4 items-center">
-                  <span className="text-sm font-bold text-gray-700">圖例說明：</span>
-                  <div className="flex space-x-2 text-[10px] font-bold text-white">
-                    <span className="px-2 py-1 bg-yellow-400 text-yellow-900 rounded">整備</span>
-                    <span className="px-2 py-1 bg-blue-500 rounded">小東 → 外站</span>
-                    <span className="px-2 py-1 bg-purple-500 rounded">外站 → 小東</span>
-                    <span className="px-2 py-1 bg-lime-500 text-lime-900 rounded">小休(15m+)</span>
-                    <span className="px-2 py-1 bg-emerald-700 rounded">大休(30m+)</span>
-                    <span className="px-2 py-1 bg-orange-400 rounded">收班</span>
-                  </div>
-                </div>
-                <div className="flex items-center">
-                  <h2 className="text-lg font-bold text-gray-800 w-40 flex-shrink-0">互動排班管理</h2>
-                  <div className="flex-1 relative h-8 ml-4" ref={timelineRef}>
-                    {timeMarkers.map((time, index) => (
-                      <div key={time} className="absolute top-0 text-xs font-semibold text-gray-500 transform -translate-x-1/2" style={{ left: `${((index * 60 + 30) / TIMELINE_TOTAL) * 100}%` }}>
-                        {time} <div className="h-[2000px] w-px bg-gray-200 mt-1"></div>
-                      </div>
-                    ))}
-                  </div>
+            <div className="bg-white rounded-xl shadow-md overflow-hidden border border-gray-200">
+              {/* 圖例說明 */}
+              <div className="px-4 py-3 bg-gray-50 border-b flex flex-wrap gap-4 items-center">
+                <span className="text-xs font-bold text-gray-400">圖例：</span>
+                <div className="flex space-x-2 text-[10px] font-bold text-white">
+                  <span className="px-2 py-1 bg-blue-500 rounded">小東 → 外站</span>
+                  <span className="px-2 py-1 bg-purple-500 rounded">外站 → 小東</span>
+                  <span className="px-2 py-1 bg-lime-500 text-lime-900 rounded">小休</span>
+                  <span className="px-2 py-1 bg-emerald-700 rounded">大休</span>
                 </div>
               </div>
-              <div className="relative p-4 overflow-hidden" style={{ minHeight: '600px' }}>
-                <div className="space-y-6 relative z-10">
-                  {processedSchedule.map((row) => (
-                    <div key={row.rowId} className="flex items-center group border-b border-gray-100 pb-4">
-                      <div className="w-40 flex-shrink-0 pr-4 text-right relative">
-                        <div className={`absolute -left-2 top-0 w-1.5 h-full rounded-full ${row.isLegal ? 'bg-green-400' : 'bg-red-500 animate-pulse'}`} title={row.violations.join('\n')}></div>
-                        <div className="font-bold text-gray-700 text-sm truncate">{row.busId}</div>
-                        <div className={`text-[10px] font-bold ${row.driverType === '早班' ? 'text-blue-600' : 'text-indigo-600'}`}>{row.driverType}</div>
-                        {!row.isLegal && <div className="text-[9px] text-red-500 font-bold mt-1 leading-tight" title={row.violations.join(', ')}>⚠️ 違反法規</div>}
-                      </div>
-                      
-                      <div className="flex-1 relative h-10 bg-gray-50/30 rounded-lg border border-dashed border-gray-200 ml-4">
-                        {/* 整備 */}
-                        {row.trips.length > 0 && (
-                          <div className="absolute h-8 top-1 bg-yellow-400 flex items-center justify-center rounded-l shadow-sm z-10"
-                               style={{ left: `${((row.trips[0].startMins - 15 - TIMELINE_START) / TIMELINE_TOTAL) * 100}%`, width: `${(15 / TIMELINE_TOTAL) * 100}%` }}>
-                            <span className="font-bold text-[8px] text-yellow-900">整備</span>
-                          </div>
-                        )}
 
-                        {/* 渲染休息區塊 */}
-                        {row.rests.map((rest, idx) => (
-                          <div key={`rest-${idx}`} className={`absolute h-8 top-1 flex items-center justify-center opacity-70 z-0 ${rest.type === 'large' ? 'bg-emerald-700 text-white' : 'bg-lime-500 text-lime-900'}`}
-                               style={{ left: `${((rest.startMins - TIMELINE_START) / TIMELINE_TOTAL) * 100}%`, width: `${(rest.duration / TIMELINE_TOTAL) * 100}%` }}>
-                            <span className="text-[7px] font-bold">{rest.duration}m</span>
-                          </div>
-                        ))}
-
-                        {/* 單程班次 */}
-                        {row.trips.map((trip) => {
-                          const leftPercent = ((trip.startMins - TIMELINE_START) / TIMELINE_TOTAL) * 100;
-                          const widthPercent = (trip.duration / TIMELINE_TOTAL) * 100;
-                          const bgColor = trip.direction === 'outbound' ? 'bg-blue-500' : 'bg-purple-500';
-                          const isDragging = draggingTrip?.tripId === trip.tripId;
-
-                          return (
-                            <div key={trip.tripId} onMouseDown={(e) => handleMouseDown(e, row.rowId, trip.tripId, trip.startMins)} 
-                                 className={`absolute h-8 top-1 flex rounded shadow text-white cursor-move group/trip ${bgColor} ${isDragging ? 'ring-2 ring-yellow-400 z-50 scale-105' : 'hover:z-30'}`} 
-                                 style={{ left: `${leftPercent}%`, width: `${widthPercent}%` }}>
-                              <div className="h-full w-full flex items-center justify-center text-[8px] font-bold tracking-tighter truncate px-1">
-                                {trip.startTimeStr} → {trip.endTimeStr}
-                              </div>
-                              <div className="absolute -top-3 -right-2 flex space-x-1 opacity-0 group-hover/trip:opacity-100 transition-opacity z-50">
-                                <button onClick={(e) => {e.stopPropagation(); toggleDirection(row.rowId, trip.tripId)}} className="w-5 h-5 bg-gray-700 rounded-full text-[10px] flex justify-center items-center shadow">↹</button>
-                                <button onClick={(e) => {e.stopPropagation(); deleteTrip(row.rowId, trip.tripId)}} className="w-5 h-5 bg-red-500 rounded-full text-[10px] flex justify-center items-center shadow">×</button>
-                              </div>
-                            </div>
-                          );
-                        })}
-
-                        {/* 收班 */}
-                        {row.trips.length > 0 && (() => {
-                          const lastTrip = row.trips[row.trips.length - 1];
-                          return (
-                            <div className={`absolute h-8 top-1 flex items-center justify-center rounded-r shadow-sm z-10 ${row.isOutstationEnd ? 'bg-red-500' : 'bg-orange-400'}`}
-                                 style={{ left: `${((lastTrip.endMins - TIMELINE_START) / TIMELINE_TOTAL) * 100}%`, width: `${(15 / TIMELINE_TOTAL) * 100}%` }}>
-                                <span className={`font-bold text-[8px] ${row.isOutstationEnd ? 'text-white' : 'text-orange-900'}`}>收班</span>
-                            </div>
-                          );
-                        })()}
-                      </div>
-                      <button onClick={() => addTrip(row.rowId)} className="ml-4 p-1.5 bg-gray-100 text-gray-500 rounded-full hover:bg-blue-100 hover:text-blue-600 transition">+</button>
+              {/* 核心排班畫布 (支援橫向捲動) */}
+              <div className="overflow-x-auto overflow-y-hidden">
+                <div style={{ width: `${zoomScale * 100}%`, minWidth: '100%' }}>
+                  
+                  {/* 時間軸刻度 */}
+                  <div className="p-4 border-b border-gray-200 bg-gray-50 flex items-center">
+                    <div className="w-32 flex-shrink-0"></div>
+                    <div className="flex-1 relative h-8 ml-4" ref={timelineRef}>
+                      {timeMarkers.map((time, index) => (
+                        <div key={time} className="absolute top-0 text-[10px] font-black text-gray-400 transform -translate-x-1/2" style={{ left: `${((index * 60 + 30) / TIMELINE_TOTAL) * 100}%` }}>
+                          {time} <div className="h-[2000px] w-px bg-gray-100 mt-1"></div>
+                        </div>
+                      ))}
                     </div>
-                  ))}
+                  </div>
+
+                  <div className="p-4 relative min-h-[600px]">
+                    <div className="space-y-6 relative z-10">
+                      {processedSchedule.map((row) => (
+                        <div key={row.rowId} className="flex items-center group">
+                          <div className="w-32 flex-shrink-0 pr-4 text-right relative">
+                            <div className={`absolute -left-1 top-0 w-1.5 h-full rounded-full ${row.isLegal ? 'bg-green-400' : 'bg-red-500 animate-pulse'}`} title={row.violations.join('\n')}></div>
+                            <div className="font-bold text-gray-700 text-xs truncate">{row.busId}</div>
+                            <div className={`text-[9px] font-bold ${row.driverType === '早班' ? 'text-blue-500' : 'text-indigo-500'}`}>{row.driverType}</div>
+                          </div>
+                          
+                          <div className="flex-1 relative h-10 bg-gray-50/40 rounded border border-dashed border-gray-200 ml-4">
+                            {/* 整備區塊 */}
+                            {row.trips.length > 0 && (
+                              <div className="absolute h-8 top-1 bg-yellow-400 flex items-center justify-center rounded-l shadow-sm z-10"
+                                   style={{ left: `${((row.trips[0].startMins - 15 - TIMELINE_START) / TIMELINE_TOTAL) * 100}%`, width: `${(15 / TIMELINE_TOTAL) * 100}%` }}>
+                                <span className="font-bold text-[8px] text-yellow-900">P</span>
+                              </div>
+                            )}
+
+                            {/* 休息區塊 */}
+                            {row.rests.map((rest, idx) => (
+                              <div key={`rest-${idx}`} className={`absolute h-8 top-1 flex items-center justify-center opacity-80 group/rest ${rest.type === 'large' ? 'bg-emerald-700 text-white' : 'bg-lime-500 text-lime-900'}`}
+                                   style={{ left: `${((rest.startMins - TIMELINE_START) / TIMELINE_TOTAL) * 100}%`, width: `${(rest.duration / TIMELINE_TOTAL) * 100}%` }}>
+                                <span className="text-[7px] font-bold">{rest.duration}</span>
+                                <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover/rest:block z-[100] pointer-events-none">
+                                  <div className="bg-gray-900 text-white text-[10px] py-1 px-2 rounded shadow-lg whitespace-nowrap">
+                                    休息：{minsToTime(rest.startMins)} - {minsToTime(rest.endMins)} ({rest.duration}分)
+                                  </div>
+                                </div>
+                              </div>
+                            ))}
+
+                            {/* 單程班次 */}
+                            {row.trips.map((trip) => {
+                              const leftPercent = ((trip.startMins - TIMELINE_START) / TIMELINE_TOTAL) * 100;
+                              const widthPercent = (trip.duration / TIMELINE_TOTAL) * 100;
+                              const bgColor = trip.direction === 'outbound' ? 'bg-blue-500' : 'bg-purple-500';
+                              const isDragging = draggingTrip?.tripId === trip.tripId;
+                              return (
+                                <div key={trip.tripId} onMouseDown={(e) => handleMouseDown(e, row.rowId, trip.tripId, trip.startMins)} 
+                                     className={`absolute h-8 top-1 flex rounded shadow text-white cursor-move group/trip ${bgColor} ${isDragging ? 'ring-2 ring-yellow-400 z-50 scale-105 shadow-xl' : 'hover:z-30 hover:brightness-110'}`} 
+                                     style={{ left: `${leftPercent}%`, width: `${widthPercent}%` }}>
+                                  <div className="h-full w-full flex items-center justify-center text-[8px] font-bold tracking-tighter truncate px-1">
+                                    {trip.startTimeStr}
+                                  </div>
+                                  {/* Tooltip */}
+                                  <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover/trip:block z-[100] pointer-events-none">
+                                    <div className="bg-gray-900 text-white text-[10px] py-2 px-3 rounded-lg shadow-xl whitespace-nowrap border border-gray-700">
+                                      <div className="font-bold mb-1 border-b border-gray-700 pb-1">{trip.direction==='outbound'?'🚀 去程':'🏡 回程'}</div>
+                                      <div>起：<span className="text-yellow-400 font-mono">{trip.startTimeStr}</span></div>
+                                      <div>迄：<span className="text-yellow-400 font-mono">{trip.endTimeStr}</span></div>
+                                    </div>
+                                    <div className="w-2 h-2 bg-gray-900 rotate-45 absolute -bottom-1 left-1/2 -translate-x-1/2"></div>
+                                  </div>
+                                  <div className="absolute -top-3 -right-2 flex space-x-1 opacity-0 group-hover/trip:opacity-100 transition-opacity z-50">
+                                    <button onClick={(e)=>{e.stopPropagation(); toggleDirection(row.rowId,trip.tripId)}} className="w-5 h-5 bg-gray-700 rounded-full text-[10px] flex justify-center items-center shadow">↹</button>
+                                    <button onClick={(e)=>{e.stopPropagation(); deleteTrip(row.rowId,trip.tripId)}} className="w-5 h-5 bg-red-500 rounded-full text-[10px] flex justify-center items-center shadow">×</button>
+                                  </div>
+                                </div>
+                              );
+                            })}
+
+                            {/* 收班 */}
+                            {row.trips.length > 0 && (() => {
+                              const lastT = row.trips[row.trips.length - 1];
+                              return (
+                                <div className={`absolute h-8 top-1 flex items-center justify-center rounded-r shadow-sm z-10 ${row.isOutstationEnd ? 'bg-red-500' : 'bg-orange-400'}`}
+                                     style={{ left: `${((lastT.endMins - TIMELINE_START) / TIMELINE_TOTAL) * 100}%`, width: `${(15 / TIMELINE_TOTAL) * 100}%` }}>
+                                    <span className="font-bold text-[8px]">S</span>
+                                </div>
+                              );
+                            })()}
+                          </div>
+                          <button onClick={() => addTrip(row.rowId)} className="ml-4 p-1.5 bg-gray-100 text-gray-400 rounded-full hover:bg-indigo-100 hover:text-indigo-600 transition">+</button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>
@@ -461,52 +422,47 @@
         );
       };
 
-      const renderTimetableView = () => {
-        const dailyAssignments = rosterData.monthlyRoster[0].assignments;
-        return (
-          <div className="p-6 bg-white rounded-2xl shadow-xl animate-fadeIn">
-            <h2 className="text-2xl font-black mb-6">今日行駛路單明細</h2>
-            {processedSchedule.map((row) => (
-              <div key={row.rowId} className="mb-8 border-l-4 border-indigo-200 pl-4">
-                <div className="flex justify-between items-center mb-2">
-                  <span className="font-black text-lg">{row.busId} ({row.driverType})</span>
-                  <span className="text-indigo-600 font-bold">駕駛：{dailyAssignments[row.rowId]}</span>
-                </div>
-                <table className="w-full text-sm">
-                  <thead>
-                    <tr className="bg-gray-50 text-gray-500 text-left border-b">
-                      <th className="p-3 font-bold">方向</th><th className="p-3 font-bold">發車</th><th className="p-3 font-bold">抵達</th><th className="p-3 font-bold">備註</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y">
-                    {row.trips.map((trip, idx) => (
-                      <tr key={trip.tripId} className="hover:bg-blue-50/30">
-                        <td className="p-3 font-bold">{trip.direction === 'outbound' ? '小東 → 外站' : '外站 → 小東'}</td>
-                        <td className="p-3 font-mono font-bold text-blue-800">{trip.startTimeStr}</td>
-                        <td className="p-3 font-mono text-gray-600">{trip.endTimeStr}</td>
-                        <td className="p-3 text-[10px]">
-                          {trip.isFirst && <span className="text-orange-500 font-bold mr-2">首班整備</span>}
-                          {trip.isLast && <span className="text-orange-500 font-bold">末班收班</span>}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+      const renderTimetableView = () => (
+        <div className="p-6 bg-white rounded-2xl shadow-xl animate-fadeIn">
+          <h2 className="text-2xl font-black mb-6 text-gray-800">今日單程行駛路單</h2>
+          {processedSchedule.map((row) => (
+            <div key={row.rowId} className="mb-8 border-l-4 border-indigo-200 pl-4">
+              <div className="flex justify-between items-center mb-2">
+                <span className="font-black text-lg">{row.busId} ({row.driverType})</span>
               </div>
-            ))}
-          </div>
-        );
-      };
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="bg-gray-50 text-gray-500 text-left border-b">
+                    <th className="p-3 font-bold">方向</th><th className="p-3 font-bold">發車</th><th className="p-3 font-bold">抵達</th><th className="p-3 font-bold">備註</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y">
+                  {row.trips.map((trip) => (
+                    <tr key={trip.tripId} className="hover:bg-blue-50/30">
+                      <td className="p-3 font-bold">{trip.direction === 'outbound' ? '小東 → 外站' : '外站 → 小東'}</td>
+                      <td className="p-3 font-mono font-bold text-blue-800">{trip.startTimeStr}</td>
+                      <td className="p-3 font-mono text-gray-600">{trip.endTimeStr}</td>
+                      <td className="p-3 text-[10px]">
+                        {trip.isFirst && <span className="text-orange-500 font-bold mr-2">需整備</span>}
+                        {trip.isLast && <span className="text-orange-500 font-bold">需收班</span>}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ))}
+        </div>
+      );
 
       const renderMonthlyView = () => (
         <div className="bg-white rounded-2xl shadow-xl p-6 h-[700px] overflow-auto animate-fadeIn text-sm">
-          <h2 className="text-2xl font-black mb-6">全月輪值總表</h2>
+          <h2 className="text-2xl font-black mb-6">全月輪值查詢</h2>
           <table className="w-full border-collapse">
             <thead className="sticky top-0 bg-gray-800 text-white z-20">
               <tr>
-                <th className="p-3 border font-black">日期</th>
-                <th className="p-3 border bg-green-900 text-[10px]">站務-早</th>
-                <th className="p-3 border bg-teal-900 text-[10px]">站務-晚</th>
+                <th className="p-3 border">日期</th>
+                <th className="p-3 border bg-green-900">站務-早</th><th className="p-3 border bg-teal-900">站務-晚</th>
                 {processedSchedule.map(s => <th key={s.rowId} className="p-3 border whitespace-nowrap text-[9px]">{s.busId.split('線')[0]}</th>)}
               </tr>
             </thead>
@@ -516,7 +472,7 @@
                   <td className="p-3 border font-black">Day {String(day.day).padStart(2, '0')}</td>
                   <td className="p-3 border text-green-700 font-bold">{day.assignments['站務-早班']}</td>
                   <td className="p-3 border text-teal-700 font-bold">{day.assignments['站務-晚班']}</td>
-                  {processedSchedule.map(s => <td key={s.rowId} className="p-3 border font-bold text-gray-600">{day.assignments[s.rowId]}</td>)}
+                  {processedSchedule.map(s => <td key={s.rowId} className="p-3 border text-gray-600">{day.assignments[s.rowId]}</td>)}
                 </tr>
               ))}
             </tbody>
@@ -530,11 +486,11 @@
             <header className="flex justify-between items-center mb-8">
               <div>
                 <h1 className="text-4xl font-black text-gray-800 tracking-tighter">小東轉運站 <span className="text-indigo-600">智慧調度系統</span></h1>
-                <p className="text-gray-500 font-bold mt-1">智慧防重疊 ‧ 雙色休息區塊 ‧ 10小時工時警告</p>
+                <p className="text-gray-500 font-bold mt-1">互動排班 ‧ 單程拆分 ‧ 全月報表</p>
               </div>
               <div className="flex space-x-2 bg-white p-1.5 rounded-2xl shadow-sm border border-gray-100">
                 {[{id:'daily', label:'排班管理'},{id:'timetable', label:'路單時刻'},{id:'monthly', label:'全月查詢'}].map(tab => (
-                  <button key={tab.id} onClick={() => setActiveTab(tab.id)} className={`px-8 py-3 rounded-xl font-black transition-all ${activeTab === tab.id ? 'bg-indigo-600 text-white shadow-lg' : 'text-gray-400'}`}>
+                  <button key={tab.id} onClick={() => setActiveTab(tab.id)} className={`px-8 py-3 rounded-xl font-black transition-all ${activeTab === tab.id ? 'bg-indigo-600 text-white shadow-lg' : 'text-gray-400 hover:bg-gray-50'}`}>
                     {tab.label}
                   </button>
                 ))}
@@ -549,7 +505,6 @@
         </div>
       );
     }
-
     const root = ReactDOM.createRoot(document.getElementById('root'));
     root.render(<App />);
   </script>
