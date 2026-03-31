@@ -1,0 +1,466 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>小東轉運站 - 智慧排班調度系統</title>
+  
+  <!-- 載入 Tailwind CSS (即時編譯) -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  
+  <!-- 載入 React 與 ReactDOM -->
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  
+  <!-- 載入 Babel (用於在瀏覽器解析 JSX) -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <!-- 📝 步驟 1：請在這裡填入您的 Firebase 專案設定 -->
+  <script>
+    // 請將以下內容替換為您從 Firebase 控制台取得的 config
+    window.__firebase_config = {
+      apiKey: "AIzaSyDawOmUMzRtExCS43qN7kqAGsBVz8TRjc0",
+      authDomain: "scheduling-system-e3f24.firebaseapp.com",
+      projectId: "scheduling-system-e3f24",
+      storageBucket: "scheduling-system-e3f24.firebasestorage.app",
+      messagingSenderId: "769948406882",
+      appId: "1:769948406882:web:9f034494cbdb942cf02d3b"
+    };
+
+    window.__app_id = typeof window.__app_id !== 'undefined' ? window.__app_id : 'bus-scheduling-app';
+    window.__initial_auth_token = typeof window.__initial_auth_token !== 'undefined' ? window.__initial_auth_token : '';
+  </script>
+
+  <!-- 透過 Module 載入 Firebase，並暴露給 React 使用 -->
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+    import { getFirestore, doc, setDoc, getDoc, serverTimestamp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+    import { getAuth, signInWithCustomToken, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+
+    window.FirebaseAPI = {
+      initializeApp, getFirestore, doc, setDoc, getDoc, serverTimestamp,
+      getAuth, signInWithCustomToken, signInAnonymously, onAuthStateChanged
+    };
+    window.dispatchEvent(new Event('firebase-loaded'));
+  </script>
+</head>
+<body class="bg-gray-100 font-sans min-h-screen">
+  
+  <!-- React 應用程式掛載點 -->
+  <div id="root"></div>
+
+  <!-- React 應用程式邏輯 (使用 JSX) -->
+  <script type="text/babel">
+    const { useState, useMemo, useEffect, useRef } = React;
+
+    // === 輔助函數區 ===
+    const timeToMins = (timeStr) => {
+      const [hours, mins] = timeStr.split(':').map(Number);
+      return hours * 60 + mins;
+    };
+
+    const minsToTime = (totalMins) => {
+      const hours = Math.floor(totalMins / 60);
+      const mins = Math.floor(totalMins % 60);
+      return `${String(hours).padStart(2, '0')}:${String(mins).padStart(2, '0')}`;
+    };
+
+    const formatDuration = (mins) => {
+      const h = Math.floor(mins / 60);
+      const m = Math.floor(mins % 60);
+      return h > 0 ? `${h}小時${m}分` : `${m}分鐘`;
+    };
+
+    // 預設路線參數
+    const defaultRoutesData = [
+      { id: 'douliu', name: '斗六線', duration: 23, destRestMins: 5 }, 
+      { id: 'minxiong', name: '民雄線', duration: 51, destRestMins: 15 },
+      { id: 'taixi', name: '臺西線', duration: 65, destRestMins: 15 },
+      { id: 'kouhu', name: '口湖線', duration: 82, destRestMins: 15 },
+      { id: 'mailiao', name: '麥寮線', duration: 90, destRestMins: 15 },
+    ];
+
+    function App() {
+      const [activeTab, setActiveTab] = useState('daily');
+      const [routesData, setRoutesData] = useState(defaultRoutesData);
+      const [dailyTrips, setDailyTrips] = useState([]);
+      const [saveStatus, setSaveStatus] = useState(null);
+      const [isLoading, setIsLoading] = useState(true);
+      const [user, setUser] = useState(null);
+      
+      const [draggingTrip, setDraggingTrip] = useState(null); 
+      const timelineRef = useRef(null);
+
+      // --- Firebase 初始化與資料載入 ---
+      useEffect(() => {
+        const initFirebaseAndLoad = async () => {
+          if (!window.FirebaseAPI) {
+            await new Promise(resolve => window.addEventListener('firebase-loaded', resolve));
+          }
+          
+          const fb = window.FirebaseAPI;
+          let config = {};
+          try { config = typeof window.__firebase_config === 'string' ? JSON.parse(window.__firebase_config) : window.__firebase_config; } catch(e) {}
+
+          // 如果有 Firebase Config (檢查有沒有真的填入 apiKey)，則連線雲端
+          if (config && config.apiKey && config.apiKey !== "請貼上您的_apiKey") {
+            try {
+              const app = fb.initializeApp(config);
+              const auth = fb.getAuth(app);
+              const db = fb.getFirestore(app);
+              window.db = db;
+              window.fb = fb;
+
+              if (window.__initial_auth_token) {
+                await fb.signInWithCustomToken(auth, window.__initial_auth_token);
+              } else {
+                await fb.signInAnonymously(auth);
+              }
+
+              fb.onAuthStateChanged(auth, async (currentUser) => {
+                setUser(currentUser);
+                if(currentUser) {
+                  try {
+                    const docRef = fb.doc(db, 'artifacts', window.__app_id, 'public', 'data', 'schedules', 'current-daily');
+                    const snap = await fb.getDoc(docRef);
+                    if(snap.exists()) {
+                      setDailyTrips(snap.data().trips);
+                    } else {
+                      optimizeSchedule(true);
+                    }
+                  } catch (e) {
+                    console.error("讀取資料失敗", e);
+                    optimizeSchedule(true);
+                  }
+                }
+                setIsLoading(false);
+              });
+            } catch(e) {
+              console.error("Firebase 初始化失敗，改以本機模式執行", e);
+              optimizeSchedule(true);
+              setIsLoading(false);
+            }
+          } else {
+            // 沒有正確的 Firebase Config，執行本機模式
+            console.log("偵測為本機單機模式 (尚未填入有效的 Firebase 設定)");
+            optimizeSchedule(true);
+            setIsLoading(false);
+          }
+        };
+        initFirebaseAndLoad();
+      }, []);
+
+      // --- 儲存邏輯 ---
+      const handleSave = async () => {
+        if (!user || !window.db) {
+          setSaveStatus("本機模式：排班已快取於畫面中 (如需雲端備份請填入 Firebase 設定)");
+          setTimeout(() => setSaveStatus(null), 3000);
+          return;
+        }
+        setSaveStatus("儲存中...");
+        try {
+          const docRef = window.fb.doc(window.db, 'artifacts', window.__app_id, 'public', 'data', 'schedules', 'current-daily');
+          await window.fb.setDoc(docRef, { trips: dailyTrips, updatedAt: window.fb.serverTimestamp() });
+          setSaveStatus("✅ 雲端儲存成功！");
+        } catch (error) {
+          console.error("儲存出錯：", error);
+          setSaveStatus("❌ 儲存失敗，請檢查網路或 Firestore 權限設定");
+        }
+        setTimeout(() => setSaveStatus(null), 3000);
+      };
+
+      // --- 最佳化排班邏輯 ---
+      const optimizeSchedule = (isInit = false) => {
+        let allSchedules = [];
+        const configs = [
+          { route: 'douliu', bus: 1, hours: [6, 7, 8, 9, 11, 12, 13, 15, 16, 17, 19, 20, 21] },
+          { route: 'minxiong', bus: 1, hours: [6, 8, 10, 12, 14, 16, 18, 20, 21] },
+          { route: 'minxiong', bus: 2, hours: [6, 7, 9, 11, 15, 17, 19, 21] },
+          { route: 'taixi', bus: 1, hours: [6, 9, 12, 15, 18, 21] },
+          { route: 'kouhu', bus: 1, hours: [6, 10, 14, 18] },
+          { route: 'mailiao', bus: 1, hours: [6, 10, 14, 18] },
+        ];
+
+        configs.forEach(config => {
+          const routeInfo = routesData.find(r => r.id === config.route);
+          const busId = `${routeInfo.name}-車${config.bus}`;
+          const trips = config.hours.map(h => ({
+            tripId: Math.random().toString(36).substr(2, 9),
+            startMins: h * 60,
+            duration: routeInfo.duration,
+            restMins: routeInfo.destRestMins,
+            isOutstationStart: (config.route === 'minxiong' && config.bus === 2)
+          }));
+          const earlyTrips = trips.filter(t => t.startMins < 14 * 60);
+          const lateTrips = trips.filter(t => t.startMins >= 14 * 60);
+          if (earlyTrips.length > 0) allSchedules.push({ rowId: `${busId}-早班`, busId, driverType: '早班', routeId: config.route, trips: earlyTrips });
+          if (lateTrips.length > 0) allSchedules.push({ rowId: `${busId}-晚班`, busId, driverType: '晚班', routeId: config.route, trips: lateTrips });
+        });
+        
+        setDailyTrips(allSchedules);
+        if(!isInit) {
+          setSaveStatus("已完成自動最佳化，別忘了按下儲存！");
+          setTimeout(() => setSaveStatus(null), 3000);
+        }
+      };
+
+      // --- 班次操作與衍生運算 ---
+      const addTrip = (rowId) => {
+        setDailyTrips(prev => prev.map(row => {
+          if (row.rowId !== rowId) return row;
+          const routeInfo = routesData.find(r => r.id === row.routeId);
+          const lastTrip = row.trips[row.trips.length - 1];
+          const newStartMins = lastTrip ? lastTrip.startMins + 120 : 480;
+          return {
+            ...row,
+            trips: [...row.trips, {
+              tripId: Math.random().toString(36).substr(2, 9),
+              startMins: Math.min(newStartMins, 1380),
+              duration: routeInfo.duration,
+              restMins: routeInfo.destRestMins,
+              isOutstationStart: row.rowId.includes('車2')
+            }].sort((a, b) => a.startMins - b.startMins)
+          };
+        }));
+      };
+
+      const deleteTrip = (rowId, tripId) => {
+        setDailyTrips(prev => prev.map(row => {
+          if (row.rowId !== rowId) return row;
+          return { ...row, trips: row.trips.filter(t => t.tripId !== tripId) };
+        }));
+      };
+
+      const processedSchedule = useMemo(() => {
+        return dailyTrips.map(row => {
+          let totalDriveMins = 0;
+          let violations = [];
+          let currentContinuousDrive = 0;
+          const trips = row.trips.map((trip, idx) => {
+            const outboundEndMins = trip.startMins + trip.duration;
+            const returnStartMins = outboundEndMins + trip.restMins;
+            const returnEndMins = returnStartMins + trip.duration;
+            currentContinuousDrive += (trip.duration * 2);
+            totalDriveMins += (trip.duration * 2);
+            if (currentContinuousDrive > 240) {
+               if (!violations.includes('連續駕駛超過4小時未休滿30分鐘')) violations.push('連續駕駛超過4小時未休滿30分鐘');
+            }
+            if (idx < row.trips.length - 1) {
+              const nextTrip = row.trips[idx + 1];
+              const gap = nextTrip.startMins - returnEndMins;
+              if (gap >= 30) currentContinuousDrive = 0; 
+            }
+            return {
+              ...trip,
+              outboundEndMins, returnStartMins, returnEndMins,
+              isFirst: idx === 0, isLast: idx === row.trips.length - 1,
+              outboundTimeStr: minsToTime(trip.startMins),
+              outboundArrStr: minsToTime(outboundEndMins),
+              returnStartStr: minsToTime(returnStartMins),
+              returnArrStr: minsToTime(returnEndMins),
+              isOutstationEnd: trip.isOutstationStart,
+              shiftEndMins: returnEndMins
+            };
+          });
+          if (trips.length > 0) {
+            const startTime = trips[0].startMins - 15;
+            const endTime = trips[trips.length - 1].shiftEndMins + 15;
+            if (endTime - startTime > 720) violations.push('單日總工時超過 12 小時');
+            if (totalDriveMins > 600) violations.push('單日行車時間超過 10 小時');
+          }
+          return { ...row, trips, violations, isLegal: violations.length === 0 };
+        });
+      }, [dailyTrips]);
+
+      const rosterData = useMemo(() => {
+        const earlyShifts = processedSchedule.filter(s => s.driverType === '早班');
+        const lateShifts = processedSchedule.filter(s => s.driverType === '晚班');
+        const earlyDriversCount = Math.ceil(earlyShifts.length * 1.4);
+        const lateDriversCount = Math.ceil(lateShifts.length * 1.4);
+        const earlyDrivers = Array.from({length: earlyDriversCount}, (_, i) => `駕駛${String(i+1).padStart(2, '0')}號`);
+        const lateDrivers = Array.from({length: lateDriversCount}, (_, i) => `駕駛${String(earlyDriversCount + i + 1).padStart(2, '0')}號`);
+        const staffMembers = ['站務01號', '站務02號', '站務03號'];
+        const monthlyRoster = [];
+        for (let day = 1; day <= 30; day++) {
+          const assignments = {};
+          assignments['站務-早班'] = staffMembers[(day) % 3];
+          assignments['站務-晚班'] = staffMembers[(day + 1) % 3];
+          earlyShifts.forEach((s, i) => assignments[s.rowId] = earlyDrivers[(day + i) % earlyDrivers.length]);
+          lateShifts.forEach((s, i) => assignments[s.rowId] = lateDrivers[(day + i) % lateDrivers.length]);
+          monthlyRoster.push({ day, assignments });
+        }
+        return { monthlyRoster, earlyShifts, lateShifts };
+      }, [processedSchedule]);
+
+      // --- 拖拽處理 ---
+      const handleMouseDown = (e, rowId, tripId, currentStartMins) => {
+        setDraggingTrip({ rowId, tripId, initialMouseX: e.clientX, initialStartMins: currentStartMins });
+        document.body.style.cursor = 'grabbing';
+      };
+      const handleMouseMove = (e) => {
+        if (!draggingTrip || !timelineRef.current) return;
+        const timelineRect = timelineRef.current.getBoundingClientRect();
+        const TIMELINE_TOTAL_MINS = 1440 - 330;
+        const deltaX = e.clientX - draggingTrip.initialMouseX;
+        const snappedDeltaMins = Math.round((deltaX / (timelineRect.width / TIMELINE_TOTAL_MINS)) / 5) * 5;
+        let newStartMins = draggingTrip.initialStartMins + snappedDeltaMins;
+        newStartMins = Math.max(345, Math.min(newStartMins, 1380));
+        setDailyTrips(prev => prev.map(row => {
+          if (row.rowId !== draggingTrip.rowId) return row;
+          return { ...row, trips: row.trips.map(t => t.tripId === draggingTrip.tripId ? { ...t, startMins: newStartMins } : t).sort((a,b)=>a.startMins-b.startMins) };
+        }));
+      };
+      useEffect(() => {
+        const up = () => { setDraggingTrip(null); document.body.style.cursor = 'default'; };
+        if (draggingTrip) { window.addEventListener('mousemove', handleMouseMove); window.addEventListener('mouseup', up); }
+        return () => { window.removeEventListener('mousemove', handleMouseMove); window.removeEventListener('mouseup', up); };
+      }, [draggingTrip]);
+
+      // --- 視圖渲染 ---
+      const renderDailyView = () => {
+        if (isLoading) return (
+          <div className="flex flex-col items-center justify-center p-20">
+            <div className="w-12 h-12 border-4 border-indigo-600 border-t-transparent rounded-full animate-spin mb-4"></div>
+            <div className="font-bold text-gray-400">正在準備資料...</div>
+          </div>
+        );
+        const TIMELINE_START = 330; const TIMELINE_END = 1440; const TIMELINE_TOTAL = TIMELINE_END - TIMELINE_START;
+        const timeMarkers = Array.from({length: 19}, (_, i) => `${String(i + 6).padStart(2, '0')}:00`);
+        return (
+          <div className="space-y-6 animate-fadeIn select-none">
+            <div className="flex justify-between items-center bg-white p-4 rounded-xl shadow-sm border border-gray-100">
+               <div className="flex space-x-3">
+                 <button onClick={handleSave} className="px-6 py-2 bg-indigo-600 text-white font-bold rounded-lg hover:bg-indigo-700 transition-all shadow-md flex items-center">
+                   <svg className="w-4 h-4 mr-2" fill="currentColor" viewBox="0 0 20 20"><path d="M7.707 10.293a1 1 0 10-1.414 1.414l3 3a1 1 0 001.414 0l3-3a1 1 0 00-1.414-1.414L11 11.586V6h5a2 2 0 012 2v7a2 2 0 01-2 2H4a2 2 0 01-2-2V8a2 2 0 012-2h5v5.586l-1.293-1.293z" /></svg>
+                   儲存排班設定
+                 </button>
+                 <button onClick={() => optimizeSchedule()} className="px-6 py-2 bg-gray-200 text-gray-700 font-bold rounded-lg hover:bg-gray-300 transition-colors flex items-center">
+                   重置最佳化
+                 </button>
+               </div>
+               {saveStatus && <div className="text-indigo-700 font-bold bg-indigo-50 px-4 py-2 rounded-lg border border-indigo-100 shadow-inner">{saveStatus}</div>}
+            </div>
+
+            <div className="bg-white rounded-xl shadow-md overflow-hidden">
+              <div className="p-4 border-b border-gray-200 bg-gray-50 flex flex-col">
+                <div className="flex items-center">
+                  <h2 className="text-lg font-bold text-gray-800 w-40 flex-shrink-0">每日排班畫布</h2>
+                  <div className="flex-1 relative h-8 ml-4" ref={timelineRef}>
+                    {timeMarkers.map((time, index) => (
+                      <div key={time} className="absolute top-0 text-xs font-semibold text-gray-500 transform -translate-x-1/2" style={{ left: `${((index * 60 + 30) / TIMELINE_TOTAL) * 100}%` }}>
+                        {time} <div className="h-[2000px] w-px bg-gray-200 mt-1"></div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+              <div className="relative p-4 overflow-hidden" style={{ minHeight: '600px' }}>
+                <div className="space-y-4 relative z-10">
+                  {processedSchedule.map((row) => (
+                    <div key={row.rowId} className="flex items-center group border-b border-gray-100 pb-2">
+                      <div className="w-40 flex-shrink-0 pr-4 text-right relative">
+                        <div className={`absolute -left-2 top-0 w-1.5 h-full rounded-full ${row.isLegal ? 'bg-green-400' : 'bg-red-500 animate-pulse'}`}></div>
+                        <div className="font-bold text-gray-700 text-sm">{row.busId}</div>
+                        <div className={`text-[10px] font-bold ${row.driverType === '早班' ? 'text-blue-600' : 'text-indigo-600'}`}>{row.driverType}</div>
+                      </div>
+                      <div className="flex-1 relative h-12 bg-gray-50/20 rounded-lg border border-dashed border-gray-200 ml-4">
+                        {row.trips.map((trip) => {
+                          const leftPercent = ((trip.startMins - TIMELINE_START) / TIMELINE_TOTAL) * 100;
+                          const totalWidth = (trip.duration * 2 + trip.restMins) / TIMELINE_TOTAL * 100;
+                          return (
+                            <div key={trip.tripId} onMouseDown={(e) => handleMouseDown(e, row.rowId, trip.tripId, trip.startMins)} className="absolute h-8 top-2 flex rounded shadow text-white cursor-move group/trip" style={{ left: `${leftPercent}%`, width: `${totalWidth}%` }}>
+                              {trip.isFirst && <div className="absolute -left-3 h-6 top-1 bg-yellow-400 w-3 rounded-l"></div>}
+                              <div className={`${trip.isOutstationStart ? 'bg-purple-500' : 'bg-blue-500'} h-full flex flex-col items-center justify-center border-r border-white/20 text-[8px] font-bold`} style={{ width: `${(trip.duration / (trip.duration*2 + trip.restMins)) * 100}%` }}>{trip.outboundTimeStr}</div>
+                              <div className="bg-green-500/80 h-full flex items-center justify-center border-r border-white/20" style={{ width: `${(trip.restMins / (trip.duration*2 + trip.restMins)) * 100}%` }}></div>
+                              <div className={`${trip.isOutstationStart ? 'bg-blue-500' : 'bg-purple-500'} h-full flex items-center justify-center rounded-r text-[8px] font-bold`} style={{ width: `${(trip.duration / (trip.duration*2 + trip.restMins)) * 100}%` }}>{trip.returnArrStr}</div>
+                              {trip.isLast && <div className="absolute -right-3 h-6 top-1 bg-orange-400 w-3 rounded-r"></div>}
+                              <button onClick={(e) => {e.stopPropagation(); deleteTrip(row.rowId, trip.tripId)}} className="absolute -top-2 -right-2 w-4 h-4 bg-red-500 rounded-full text-[10px] opacity-0 group-hover/trip:opacity-100 transition-opacity flex justify-center items-center">×</button>
+                            </div>
+                          );
+                        })}
+                      </div>
+                      <button onClick={() => addTrip(row.rowId)} className="ml-4 p-1.5 bg-gray-100 text-gray-500 rounded-full hover:bg-blue-100 hover:text-blue-600">+</button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      };
+
+      const renderTimetableView = () => {
+        const dailyAssignments = rosterData.monthlyRoster[0].assignments;
+        return (
+          <div className="p-6 bg-white rounded-2xl shadow-xl animate-fadeIn">
+            <h2 className="text-2xl font-black mb-6 border-b-4 border-indigo-600 pb-2 inline-block">行駛時刻明細表</h2>
+            {processedSchedule.map((row) => (
+              <div key={row.rowId} className="mb-8 border-l-4 border-gray-200 pl-4">
+                <div className="flex justify-between items-center mb-2">
+                  <span className="font-black text-lg">{row.busId} ({row.driverType})</span>
+                  <span className="text-indigo-600 font-bold">駕駛人：{dailyAssignments[row.rowId]}</span>
+                </div>
+                <div className="grid grid-cols-4 gap-4 bg-gray-50 p-3 rounded-lg text-xs font-bold text-gray-500">
+                   <div>起站發車</div><div>抵達終點</div><div>回程發車</div><div>回到起站</div>
+                </div>
+                {row.trips.map(trip => (
+                  <div key={trip.tripId} className="grid grid-cols-4 gap-4 p-3 border-b border-gray-100 text-sm font-mono">
+                    <div className="text-blue-600 font-bold">{trip.outboundTimeStr}</div><div>{trip.outboundArrStr}</div><div>{trip.returnStartStr}</div><div className="text-purple-600 font-bold">{trip.returnArrStr}</div>
+                  </div>
+                ))}
+              </div>
+            ))}
+          </div>
+        );
+      };
+
+      const renderMonthlyView = () => (
+        <div className="bg-white rounded-2xl shadow-xl p-6 h-[700px] overflow-auto animate-fadeIn text-sm">
+          <h2 className="text-2xl font-black mb-6">全月輪值查詢 (自動排休模式)</h2>
+          <table className="w-full border-collapse">
+            <thead className="sticky top-0 bg-gray-800 text-white">
+              <tr><th className="p-3 border">日期</th>{processedSchedule.map(s => <th key={s.rowId} className="p-3 border whitespace-nowrap">{s.busId.split('線')[0]}</th>)}</tr>
+            </thead>
+            <tbody>
+              {rosterData.monthlyRoster.map(day => (
+                <tr key={day.day} className="hover:bg-blue-50">
+                  <td className="p-3 border font-black">Day {day.day}</td>
+                  {processedSchedule.map(s => <td key={s.rowId} className="p-3 border text-[10px] font-bold text-gray-600">{day.assignments[s.rowId]}</td>)}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      );
+
+      return (
+        <div className="min-h-screen bg-gray-100 p-6 font-sans">
+          <div className="max-w-7xl mx-auto">
+            <header className="flex justify-between items-center mb-8">
+              <div>
+                <h1 className="text-4xl font-black text-gray-800 tracking-tighter">小東轉運站 <span className="text-indigo-600">雲端調度系統</span></h1>
+                <p className="text-gray-500 font-bold mt-1">單一 HTML 封裝版 ‧ 直接開啟即可運作</p>
+              </div>
+              <div className="flex space-x-2 bg-white p-1.5 rounded-2xl shadow-sm border border-gray-100">
+                {[{id:'daily', label:'排班管理'},{id:'timetable', label:'路單時刻'},{id:'monthly', label:'全月查詢'}].map(tab => (
+                  <button key={tab.id} onClick={() => setActiveTab(tab.id)} className={`px-8 py-3 rounded-xl font-black transition-all ${activeTab === tab.id ? 'bg-indigo-600 text-white shadow-lg' : 'text-gray-400'}`}>
+                    {tab.label}
+                  </button>
+                ))}
+              </div>
+            </header>
+            <main>
+              {activeTab === 'daily' && renderDailyView()}
+              {activeTab === 'timetable' && renderTimetableView()}
+              {activeTab === 'monthly' && renderMonthlyView()}
+            </main>
+          </div>
+        </div>
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+</body>
+</html>
