@@ -109,7 +109,7 @@
                 setUser(currentUser);
                 if(currentUser) {
                   try {
-                    const docRef = fb.doc(db, 'artifacts', window.__app_id, 'public', 'data', 'schedules', 'current-daily-v5');
+                    const docRef = fb.doc(db, 'artifacts', window.__app_id, 'public', 'data', 'schedules', 'current-daily-v6');
                     const snap = await fb.getDoc(docRef);
                     if(snap.exists()) { setDailyTrips(snap.data().trips); } 
                     else { optimizeSchedule(true); }
@@ -131,7 +131,7 @@
         }
         setSaveStatus("儲存中...");
         try {
-          const docRef = window.fb.doc(window.db, 'artifacts', window.__app_id, 'public', 'data', 'schedules', 'current-daily-v5');
+          const docRef = window.fb.doc(window.db, 'artifacts', window.__app_id, 'public', 'data', 'schedules', 'current-daily-v6');
           await window.fb.setDoc(docRef, { trips: dailyTrips, updatedAt: window.fb.serverTimestamp() });
           setSaveStatus("✅ 雲端儲存成功！");
         } catch (error) { setSaveStatus("❌ 儲存失敗"); }
@@ -140,26 +140,40 @@
 
       const optimizeSchedule = (isInit = false) => {
         let allSchedules = [];
+        // 重新設計配置：補齊臺西、口湖、麥寮的人力以達成每小時發車
         const configs = [
           { route: 'douliu', bus: 1, hours: [6, 7, 8, 9, 11, 12, 13, 15, 16, 17, 19, 20, 21] },
-          { route: 'minxiong', bus: 1, hours: [6, 8, 10, 12, 14, 16, 18, 20, 21] },
-          { route: 'minxiong', bus: 2, hours: [6, 7, 9, 11, 15, 17, 19, 21] },
+          { route: 'minxiong', bus: 1, hours: [6, 8, 10, 12, 14, 16, 18, 20] },
+          { route: 'minxiong', bus: 2, hours: [7, 9, 11, 13, 15, 17, 19, 21] },
+          // 臺西線：3台車循環
           { route: 'taixi', bus: 1, hours: [6, 9, 12, 15, 18, 21] },
-          { route: 'kouhu', bus: 1, hours: [6, 10, 14, 18] },
+          { route: 'taixi', bus: 2, hours: [7, 10, 13, 16, 19] },
+          { route: 'taixi', bus: 3, hours: [8, 11, 14, 17, 20] },
+          // 口湖線：3台車循環
+          { route: 'kouhu', bus: 1, hours: [6, 9, 12, 15, 18, 21] },
+          { route: 'kouhu', bus: 2, hours: [7, 10, 13, 16, 19] },
+          { route: 'kouhu', bus: 3, hours: [8, 11, 14, 17, 20] },
+          // 麥寮線：4台車循環
           { route: 'mailiao', bus: 1, hours: [6, 10, 14, 18] },
+          { route: 'mailiao', bus: 2, hours: [7, 11, 15, 19] },
+          { route: 'mailiao', bus: 3, hours: [8, 12, 16, 20] },
+          { route: 'mailiao', bus: 4, hours: [9, 13, 17, 21] },
         ];
+
         const genId = () => Math.random().toString(36).substr(2, 9);
         configs.forEach(config => {
           const routeInfo = routesData.find(r => r.id === config.route);
           const busId = `${routeInfo.name}-車${config.bus}`;
           const isOutstationBase = (config.route === 'minxiong' && config.bus === 2);
           let earlyTrips = []; let lateTrips = [];
+          
           config.hours.forEach(h => {
             const startMins = h * 60 + (config.route === 'douliu' && (h===11||h===19) ? -30 : 0);
             const duration = routeInfo.duration;
             const restMins = routeInfo.destRestMins;
             const isEarly = startMins < 14 * 60;
             const targetArray = isEarly ? earlyTrips : lateTrips;
+
             if (isOutstationBase) {
               targetArray.push({ tripId: genId(), startMins: startMins, duration, direction: 'inbound' });
               targetArray.push({ tripId: genId(), startMins: startMins + duration + restMins, duration, direction: 'outbound' });
@@ -171,8 +185,9 @@
           if (earlyTrips.length > 0) allSchedules.push({ rowId: `${busId}-早班`, busId, driverType: '早班', routeId: config.route, trips: earlyTrips });
           if (lateTrips.length > 0) allSchedules.push({ rowId: `${busId}-晚班`, busId, driverType: '晚班', routeId: config.route, trips: lateTrips });
         });
+        
         setDailyTrips(allSchedules);
-        if(!isInit) { setSaveStatus("已重置排班！"); setTimeout(() => setSaveStatus(null), 3000); }
+        if(!isInit) { setSaveStatus("已成功擴充人力並補齊班次！"); setTimeout(() => setSaveStatus(null), 3000); }
       };
 
       const addTrip = (rowId) => {
@@ -185,7 +200,7 @@
              newDirection = lastTrip.direction === 'outbound' ? 'inbound' : 'outbound';
              const restMins = lastTrip.direction === 'outbound' ? routeInfo.destRestMins : 15;
              newStartMins = lastTrip.startMins + lastTrip.duration + restMins;
-          } else if (row.rowId.includes('車2')) { newDirection = 'inbound'; }
+          }
           return {
             ...row,
             trips: [...row.trips, {
@@ -221,20 +236,10 @@
               const prevTrip = row.trips[idx - 1];
               const prevEndMins = prevTrip.startMins + prevTrip.duration;
               const gap = trip.startMins - prevEndMins;
-              
-              // 連續駕駛重置判定：大於等於 30 分鐘重置
               if (gap >= 30) currentContinuousDrive = 0;
-              
               if (prevTrip.direction === trip.direction && !violations.includes('動線不連續')) violations.push('動線不連續');
-              
-              // 自動補休息區塊邏輯更新
               if (gap > 0) {
-                rests.push({ 
-                  startMins: prevEndMins, 
-                  endMins: trip.startMins, 
-                  duration: gap, 
-                  type: gap >= 30 ? 'large' : 'small' 
-                });
+                rests.push({ startMins: prevEndMins, endMins: trip.startMins, duration: gap, type: gap >= 30 ? 'large' : 'small' });
               }
             }
             currentContinuousDrive += trip.duration; totalDriveMins += trip.duration;
@@ -266,8 +271,8 @@
           const assignments = {};
           assignments['站務-早班'] = staffMembers[(day) % 3];
           assignments['站務-晚班'] = staffMembers[(day + 1) % 3];
-          earlyShifts.forEach((s, i) => assignments[s.rowId] = `駕駛E${String((day+i)%10+1).padStart(2,'0')}`);
-          lateShifts.forEach((s, i) => assignments[s.rowId] = `駕駛L${String((day+i)%10+1).padStart(2,'0')}`);
+          earlyShifts.forEach((s, i) => assignments[s.rowId] = `駕駛E${String((day+i)%20+1).padStart(2,'0')}`);
+          lateShifts.forEach((s, i) => assignments[s.rowId] = `駕駛L${String((day+i)%20+1).padStart(2,'0')}`);
           monthlyRoster.push({ day, assignments });
         }
         return { monthlyRoster, earlyShifts, lateShifts };
@@ -306,7 +311,6 @@
         if (isLoading) return <div className="p-20 text-center font-bold text-gray-400">系統初始化中...</div>;
         const TIMELINE_START = 330; const TIMELINE_END = 1440; const TIMELINE_TOTAL = TIMELINE_END - TIMELINE_START;
         const timeMarkers = Array.from({length: 19}, (_, i) => `${String(i + 6).padStart(2, '0')}:00`);
-        
         return (
           <div className="space-y-6 animate-fadeIn select-none">
             <div className="flex justify-between items-center bg-white p-4 rounded-xl shadow-sm border border-gray-100 sticky top-0 z-50">
@@ -329,8 +333,8 @@
                 <div className="flex space-x-2 text-[10px] font-bold text-white">
                   <span className="px-2 py-1 bg-blue-500 rounded">小東 → 外站</span>
                   <span className="px-2 py-1 bg-purple-500 rounded">外站 → 小東</span>
-                  <span className="px-2 py-1 bg-lime-500 text-lime-900 rounded">小休(＜30m)</span>
-                  <span className="px-2 py-1 bg-emerald-700 rounded">大休(≧30m)</span>
+                  <span className="px-2 py-1 bg-lime-500 text-lime-900 rounded">小休</span>
+                  <span className="px-2 py-1 bg-emerald-700 rounded">大休</span>
                 </div>
               </div>
 
@@ -369,7 +373,7 @@
                                 {rest.duration >= 10 && <span className="text-[7px] font-bold">{rest.duration}</span>}
                                 <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover/rest:block z-[100] pointer-events-none">
                                   <div className="bg-gray-900 text-white text-[10px] py-1 px-2 rounded shadow-lg whitespace-nowrap">
-                                    {rest.type === 'large' ? '【大休】' : '【小休】'}：{minsToTime(rest.startMins)} - {minsToTime(rest.endMins)} ({rest.duration}分)
+                                    休息：{minsToTime(rest.startMins)} - {minsToTime(rest.endMins)} ({rest.duration}分)
                                   </div>
                                 </div>
                               </div>
@@ -449,7 +453,6 @@
                     </tr>
                   </thead>
                   <tbody className="divide-y">
-                    {/* 仕業明細：將行程與休息混合排列 */}
                     {(() => {
                       const details = [];
                       if (row.trips.length > 0) {
@@ -488,13 +491,16 @@
 
       const renderMonthlyView = () => (
         <div className="bg-white rounded-2xl shadow-xl p-6 h-[700px] overflow-auto animate-fadeIn text-sm">
-          <h2 className="text-2xl font-black mb-6">全月輪值查詢</h2>
+          <h2 className="text-2xl font-black mb-6 text-gray-800">全月人員輪值查詢 (作5休2 / 作2休1)</h2>
+          <div className="mb-4 p-3 bg-blue-50 text-blue-700 text-xs rounded-lg border border-blue-100">
+            💡 已自動補足配置：臺西線 3 車、口湖線 3 車、麥寮線 4 車，達成小東轉運站每小時發一班車。
+          </div>
           <table className="w-full border-collapse">
             <thead className="sticky top-0 bg-gray-800 text-white z-20">
               <tr>
                 <th className="p-3 border">日期</th>
                 <th className="p-3 border bg-green-900">站務-早</th><th className="p-3 border bg-teal-900">站務-晚</th>
-                {processedSchedule.map(s => <th key={s.rowId} className="p-3 border whitespace-nowrap text-[9px]">{s.busId.split('線')[0]}</th>)}
+                {processedSchedule.map(s => <th key={s.rowId} className="p-3 border whitespace-nowrap text-[9px]">{s.busId.split('線')[0]} ({s.driverType})</th>)}
               </tr>
             </thead>
             <tbody>
@@ -517,7 +523,7 @@
             <header className="flex justify-between items-center mb-8">
               <div>
                 <h1 className="text-4xl font-black text-gray-800 tracking-tighter">小東轉運站 <span className="text-indigo-600">智慧調度系統</span></h1>
-                <p className="text-gray-500 font-bold mt-1">智慧休息區塊補完 ‧ 大小休自動判定 ‧ 10小時工時警告</p>
+                <p className="text-gray-500 font-bold mt-1">互動排班 ‧ 仕業表管理 ‧ 人力自動配給</p>
               </div>
               <div className="flex space-x-2 bg-white p-1.5 rounded-2xl shadow-sm border border-gray-100">
                 {[{id:'daily', label:'排班管理'},{id:'timetable', label:'仕業表'},{id:'monthly', label:'全月查詢'}].map(tab => (
