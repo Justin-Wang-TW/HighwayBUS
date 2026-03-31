@@ -140,20 +140,16 @@
 
       const optimizeSchedule = (isInit = false) => {
         let allSchedules = [];
-        // 重新設計配置：補齊臺西、口湖、麥寮的人力以達成每小時發車
         const configs = [
           { route: 'douliu', bus: 1, hours: [6, 7, 8, 9, 11, 12, 13, 15, 16, 17, 19, 20, 21] },
           { route: 'minxiong', bus: 1, hours: [6, 8, 10, 12, 14, 16, 18, 20] },
           { route: 'minxiong', bus: 2, hours: [7, 9, 11, 13, 15, 17, 19, 21] },
-          // 臺西線：3台車循環
           { route: 'taixi', bus: 1, hours: [6, 9, 12, 15, 18, 21] },
           { route: 'taixi', bus: 2, hours: [7, 10, 13, 16, 19] },
           { route: 'taixi', bus: 3, hours: [8, 11, 14, 17, 20] },
-          // 口湖線：3台車循環
           { route: 'kouhu', bus: 1, hours: [6, 9, 12, 15, 18, 21] },
           { route: 'kouhu', bus: 2, hours: [7, 10, 13, 16, 19] },
           { route: 'kouhu', bus: 3, hours: [8, 11, 14, 17, 20] },
-          // 麥寮線：4台車循環
           { route: 'mailiao', bus: 1, hours: [6, 10, 14, 18] },
           { route: 'mailiao', bus: 2, hours: [7, 11, 15, 19] },
           { route: 'mailiao', bus: 3, hours: [8, 12, 16, 20] },
@@ -265,17 +261,25 @@
       const rosterData = useMemo(() => {
         const earlyShifts = processedSchedule.filter(s => s.driverType === '早班');
         const lateShifts = processedSchedule.filter(s => s.driverType === '晚班');
+        
+        // 依據法規與輪休原則計算所需總人數
+        const earlyDriversCount = Math.ceil(earlyShifts.length * 1.4);
+        const lateDriversCount = Math.ceil(lateShifts.length * 1.4);
+        const totalDrivers = earlyDriversCount + lateDriversCount;
+        
         const staffMembers = ['站務01號', '站務02號', '站務03號'];
+        const totalStaff = staffMembers.length;
+
         const monthlyRoster = [];
         for (let day = 1; day <= 30; day++) {
           const assignments = {};
           assignments['站務-早班'] = staffMembers[(day) % 3];
           assignments['站務-晚班'] = staffMembers[(day + 1) % 3];
-          earlyShifts.forEach((s, i) => assignments[s.rowId] = `駕駛E${String((day+i)%20+1).padStart(2,'0')}`);
-          lateShifts.forEach((s, i) => assignments[s.rowId] = `駕駛L${String((day+i)%20+1).padStart(2,'0')}`);
+          earlyShifts.forEach((s, i) => assignments[s.rowId] = `駕駛E${String((day+i)%earlyDriversCount+1).padStart(2,'0')}`);
+          lateShifts.forEach((s, i) => assignments[s.rowId] = `駕駛L${String((day+i)%lateDriversCount+1).padStart(2,'0')}`);
           monthlyRoster.push({ day, assignments });
         }
-        return { monthlyRoster, earlyShifts, lateShifts };
+        return { monthlyRoster, earlyShifts, lateShifts, totalDrivers, totalStaff };
       }, [processedSchedule]);
 
       const handleMouseDown = (e, rowId, tripId, currentStartMins) => {
@@ -493,7 +497,7 @@
         <div className="bg-white rounded-2xl shadow-xl p-6 h-[700px] overflow-auto animate-fadeIn text-sm">
           <h2 className="text-2xl font-black mb-6 text-gray-800">全月人員輪值查詢 (作5休2 / 作2休1)</h2>
           <div className="mb-4 p-3 bg-blue-50 text-blue-700 text-xs rounded-lg border border-blue-100">
-            💡 已自動補足配置：臺西線 3 車、口湖線 3 車、麥寮線 4 車，達成小東轉運站每小時發一班車。
+            💡 系統已自動計算最優人力配置，確保符合每日班次需求。
           </div>
           <table className="w-full border-collapse">
             <thead className="sticky top-0 bg-gray-800 text-white z-20">
@@ -520,17 +524,32 @@
       return (
         <div className="min-h-screen bg-gray-100 p-6 font-sans">
           <div className="max-w-7xl mx-auto">
-            <header className="flex justify-between items-center mb-8">
+            <header className="flex justify-between items-start mb-8">
               <div>
                 <h1 className="text-4xl font-black text-gray-800 tracking-tighter">小東轉運站 <span className="text-indigo-600">智慧調度系統</span></h1>
-                <p className="text-gray-500 font-bold mt-1">互動排班 ‧ 仕業表管理 ‧ 人力自動配給</p>
+                <p className="text-gray-500 font-bold mt-1">互動排班 ‧ 仕業表管理 ‧ 人力需求分析</p>
               </div>
-              <div className="flex space-x-2 bg-white p-1.5 rounded-2xl shadow-sm border border-gray-100">
-                {[{id:'daily', label:'排班管理'},{id:'timetable', label:'仕業表'},{id:'monthly', label:'全月查詢'}].map(tab => (
-                  <button key={tab.id} onClick={() => setActiveTab(tab.id)} className={`px-8 py-3 rounded-xl font-black transition-all ${activeTab === tab.id ? 'bg-indigo-600 text-white shadow-lg' : 'text-gray-400 hover:bg-gray-50'}`}>
-                    {tab.label}
-                  </button>
-                ))}
+              
+              <div className="flex flex-col items-end space-y-4">
+                {/* 🚀 人力資源需求統計卡片 */}
+                <div className="bg-white px-6 py-3 rounded-2xl shadow-sm border border-gray-100 flex items-center space-x-6">
+                  <div className="text-right border-r pr-6 border-gray-100">
+                    <div className="text-[10px] text-gray-400 font-black uppercase tracking-widest">總需駕駛員</div>
+                    <div className="text-2xl font-black text-indigo-600">{rosterData.totalDrivers} <span className="text-sm text-gray-400">名</span></div>
+                  </div>
+                  <div className="text-right">
+                    <div className="text-[10px] text-gray-400 font-black uppercase tracking-widest">總需站務員</div>
+                    <div className="text-2xl font-black text-green-600">{rosterData.totalStaff} <span className="text-sm text-gray-400">名</span></div>
+                  </div>
+                </div>
+
+                <div className="flex space-x-2 bg-white p-1.5 rounded-2xl shadow-sm border border-gray-100">
+                  {[{id:'daily', label:'排班管理'},{id:'timetable', label:'仕業表'},{id:'monthly', label:'全月查詢'}].map(tab => (
+                    <button key={tab.id} onClick={() => setActiveTab(tab.id)} className={`px-8 py-3 rounded-xl font-black transition-all ${activeTab === tab.id ? 'bg-indigo-600 text-white shadow-lg' : 'text-gray-400 hover:bg-gray-50'}`}>
+                      {tab.label}
+                    </button>
+                  ))}
+                </div>
               </div>
             </header>
             <main>
