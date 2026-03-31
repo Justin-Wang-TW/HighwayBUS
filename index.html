@@ -80,12 +80,11 @@
       const [saveStatus, setSaveStatus] = useState(null);
       const [isLoading, setIsLoading] = useState(true);
       const [user, setUser] = useState(null);
-      const [zoomScale, setZoomScale] = useState(1); // 1 = 100%, 2 = 200%
+      const [zoomScale, setZoomScale] = useState(1);
       
       const [draggingTrip, setDraggingTrip] = useState(null); 
       const timelineRef = useRef(null);
 
-      // --- Firebase 載入 ---
       useEffect(() => {
         const initFirebaseAndLoad = async () => {
           if (!window.FirebaseAPI) await new Promise(resolve => window.addEventListener('firebase-loaded', resolve));
@@ -110,7 +109,7 @@
                 setUser(currentUser);
                 if(currentUser) {
                   try {
-                    const docRef = fb.doc(db, 'artifacts', window.__app_id, 'public', 'data', 'schedules', 'current-daily-v4');
+                    const docRef = fb.doc(db, 'artifacts', window.__app_id, 'public', 'data', 'schedules', 'current-daily-v5');
                     const snap = await fb.getDoc(docRef);
                     if(snap.exists()) { setDailyTrips(snap.data().trips); } 
                     else { optimizeSchedule(true); }
@@ -132,7 +131,7 @@
         }
         setSaveStatus("儲存中...");
         try {
-          const docRef = window.fb.doc(window.db, 'artifacts', window.__app_id, 'public', 'data', 'schedules', 'current-daily-v4');
+          const docRef = window.fb.doc(window.db, 'artifacts', window.__app_id, 'public', 'data', 'schedules', 'current-daily-v5');
           await window.fb.setDoc(docRef, { trips: dailyTrips, updatedAt: window.fb.serverTimestamp() });
           setSaveStatus("✅ 雲端儲存成功！");
         } catch (error) { setSaveStatus("❌ 儲存失敗"); }
@@ -222,9 +221,21 @@
               const prevTrip = row.trips[idx - 1];
               const prevEndMins = prevTrip.startMins + prevTrip.duration;
               const gap = trip.startMins - prevEndMins;
+              
+              // 連續駕駛重置判定：大於等於 30 分鐘重置
               if (gap >= 30) currentContinuousDrive = 0;
+              
               if (prevTrip.direction === trip.direction && !violations.includes('動線不連續')) violations.push('動線不連續');
-              if (gap >= 15) rests.push({ startMins: prevEndMins, endMins: trip.startMins, duration: gap, type: gap >= 30 ? 'large' : 'small' });
+              
+              // 自動補休息區塊邏輯更新
+              if (gap > 0) {
+                rests.push({ 
+                  startMins: prevEndMins, 
+                  endMins: trip.startMins, 
+                  duration: gap, 
+                  type: gap >= 30 ? 'large' : 'small' 
+                });
+              }
             }
             currentContinuousDrive += trip.duration; totalDriveMins += trip.duration;
             if (currentContinuousDrive > 240 && !violations.includes('連續駕駛超標')) violations.push('連續駕駛超標');
@@ -262,7 +273,6 @@
         return { monthlyRoster, earlyShifts, lateShifts };
       }, [processedSchedule]);
 
-      // --- 拖拽處理 ---
       const handleMouseDown = (e, rowId, tripId, currentStartMins) => {
         setDraggingTrip({ rowId, tripId, initialMouseX: e.clientX, initialStartMins: currentStartMins });
         document.body.style.cursor = 'grabbing';
@@ -292,7 +302,6 @@
         return () => { window.removeEventListener('mousemove', handleMouseMove); window.removeEventListener('mouseup', up); };
       }, [draggingTrip]);
 
-      // --- 視圖渲染 ---
       const renderDailyView = () => {
         if (isLoading) return <div className="p-20 text-center font-bold text-gray-400">系統初始化中...</div>;
         const TIMELINE_START = 330; const TIMELINE_END = 1440; const TIMELINE_TOTAL = TIMELINE_END - TIMELINE_START;
@@ -304,13 +313,11 @@
                <div className="flex items-center space-x-3">
                  <button onClick={handleSave} className="px-6 py-2 bg-indigo-600 text-white font-bold rounded-lg hover:bg-indigo-700 transition-all shadow-md">儲存排班</button>
                  <button onClick={() => optimizeSchedule()} className="px-4 py-2 bg-gray-100 text-gray-600 font-bold rounded-lg hover:bg-gray-200">最佳化</button>
-                 
                  <div className="h-6 w-px bg-gray-200 mx-2"></div>
-                 
                  <div className="flex items-center bg-gray-100 rounded-lg p-1">
-                   <button onClick={() => setZoomScale(Math.max(1, zoomScale - 0.25))} className="w-10 h-8 flex items-center justify-center font-bold text-gray-600 hover:bg-white rounded transition-colors" title="縮小 (Zoom Out)">－</button>
+                   <button onClick={() => setZoomScale(Math.max(1, zoomScale - 0.25))} className="w-10 h-8 flex items-center justify-center font-bold text-gray-600 hover:bg-white rounded transition-colors">－</button>
                    <span className="px-3 text-xs font-black text-gray-500 w-16 text-center">{Math.round(zoomScale * 100)}%</span>
-                   <button onClick={() => setZoomScale(Math.min(3, zoomScale + 0.25))} className="w-10 h-8 flex items-center justify-center font-bold text-gray-600 hover:bg-white rounded transition-colors" title="放大 (Zoom In)">＋</button>
+                   <button onClick={() => setZoomScale(Math.min(3, zoomScale + 0.25))} className="w-10 h-8 flex items-center justify-center font-bold text-gray-600 hover:bg-white rounded transition-colors">＋</button>
                  </div>
                </div>
                {saveStatus && <div className="text-indigo-700 font-bold px-4 py-2 rounded-lg border border-indigo-100 bg-indigo-50 animate-pulse">{saveStatus}</div>}
@@ -322,8 +329,8 @@
                 <div className="flex space-x-2 text-[10px] font-bold text-white">
                   <span className="px-2 py-1 bg-blue-500 rounded">小東 → 外站</span>
                   <span className="px-2 py-1 bg-purple-500 rounded">外站 → 小東</span>
-                  <span className="px-2 py-1 bg-lime-500 text-lime-900 rounded">小休</span>
-                  <span className="px-2 py-1 bg-emerald-700 rounded">大休</span>
+                  <span className="px-2 py-1 bg-lime-500 text-lime-900 rounded">小休(＜30m)</span>
+                  <span className="px-2 py-1 bg-emerald-700 rounded">大休(≧30m)</span>
                 </div>
               </div>
 
@@ -359,10 +366,10 @@
                             {row.rests.map((rest, idx) => (
                               <div key={`rest-${idx}`} className={`absolute h-8 top-1 flex items-center justify-center opacity-80 group/rest ${rest.type === 'large' ? 'bg-emerald-700 text-white' : 'bg-lime-500 text-lime-900'}`}
                                    style={{ left: `${((rest.startMins - TIMELINE_START) / TIMELINE_TOTAL) * 100}%`, width: `${(rest.duration / TIMELINE_TOTAL) * 100}%` }}>
-                                <span className="text-[7px] font-bold">{rest.duration}</span>
+                                {rest.duration >= 10 && <span className="text-[7px] font-bold">{rest.duration}</span>}
                                 <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover/rest:block z-[100] pointer-events-none">
                                   <div className="bg-gray-900 text-white text-[10px] py-1 px-2 rounded shadow-lg whitespace-nowrap">
-                                    休息：{minsToTime(rest.startMins)} - {minsToTime(rest.endMins)} ({rest.duration}分)
+                                    {rest.type === 'large' ? '【大休】' : '【小休】'}：{minsToTime(rest.startMins)} - {minsToTime(rest.endMins)} ({rest.duration}分)
                                   </div>
                                 </div>
                               </div>
@@ -438,21 +445,39 @@
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="bg-gray-50 text-gray-500 text-left border-b">
-                      <th className="p-3 font-bold">方向</th><th className="p-3 font-bold">發車</th><th className="p-3 font-bold">抵達</th><th className="p-3 font-bold">備註</th>
+                      <th className="p-3 font-bold">方向/項目</th><th className="p-3 font-bold">開始時刻</th><th className="p-3 font-bold">結束時刻</th><th className="p-3 font-bold">時長</th><th className="p-3 font-bold">備註</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y">
-                    {row.trips.map((trip) => (
-                      <tr key={trip.tripId} className="hover:bg-blue-50/30">
-                        <td className="p-3 font-bold">{trip.direction === 'outbound' ? '小東 → 外站' : '外站 → 小東'}</td>
-                        <td className="p-3 font-mono font-bold text-blue-800">{trip.startTimeStr}</td>
-                        <td className="p-3 font-mono text-gray-600">{trip.endTimeStr}</td>
-                        <td className="p-3 text-[10px]">
-                          {trip.isFirst && <span className="text-orange-500 font-bold mr-2">需整備(15m)</span>}
-                          {trip.isLast && <span className="text-orange-500 font-bold">需收班(15m)</span>}
-                        </td>
-                      </tr>
-                    ))}
+                    {/* 仕業明細：將行程與休息混合排列 */}
+                    {(() => {
+                      const details = [];
+                      if (row.trips.length > 0) {
+                        details.push({ type: 'prep', label: '行前整備', start: minsToTime(row.trips[0].startMins - 15), end: minsToTime(row.trips[0].startMins), dur: 15 });
+                      }
+                      row.trips.forEach((t, i) => {
+                        details.push({ type: 'trip', label: t.direction === 'outbound' ? '🚀 小東 → 外站' : '🏡 外站 → 小東', start: t.startTimeStr, end: t.endTimeStr, dur: t.duration });
+                        const nextRest = row.rests.find(r => r.startMins === t.endMins);
+                        if (nextRest) {
+                          details.push({ type: 'rest', label: nextRest.type === 'large' ? '☕ 大休息' : '🥛 小休息', start: minsToTime(nextRest.startMins), end: minsToTime(nextRest.endMins), dur: nextRest.duration });
+                        }
+                      });
+                      if (row.trips.length > 0) {
+                        const lastT = row.trips[row.trips.length - 1];
+                        details.push({ type: 'finish', label: '下班收班', start: minsToTime(lastT.endMins), end: minsToTime(lastT.endMins + 15), dur: 15 });
+                      }
+                      return details.map((d, idx) => (
+                        <tr key={idx} className={`${d.type === 'rest' ? 'bg-gray-50/50 text-gray-500' : 'hover:bg-blue-50/30'}`}>
+                          <td className={`p-3 font-bold ${d.type === 'trip' ? (d.label.includes('小東') ? 'text-blue-600' : 'text-purple-600') : d.type === 'rest' ? 'text-green-600' : 'text-orange-600'}`}>{d.label}</td>
+                          <td className="p-3 font-mono">{d.start}</td>
+                          <td className="p-3 font-mono">{d.end}</td>
+                          <td className="p-3 text-xs">{d.dur} 分</td>
+                          <td className="p-3 text-[10px] font-bold">
+                            {d.type === 'rest' && (d.dur >= 30 ? <span className="text-emerald-700">符合大休</span> : <span className="text-lime-600">小休區間</span>)}
+                          </td>
+                        </tr>
+                      ));
+                    })()}
                   </tbody>
                 </table>
               </div>
@@ -492,7 +517,7 @@
             <header className="flex justify-between items-center mb-8">
               <div>
                 <h1 className="text-4xl font-black text-gray-800 tracking-tighter">小東轉運站 <span className="text-indigo-600">智慧調度系統</span></h1>
-                <p className="text-gray-500 font-bold mt-1">互動排班 ‧ 仕業表管理 ‧ 全月報表</p>
+                <p className="text-gray-500 font-bold mt-1">智慧休息區塊補完 ‧ 大小休自動判定 ‧ 10小時工時警告</p>
               </div>
               <div className="flex space-x-2 bg-white p-1.5 rounded-2xl shadow-sm border border-gray-100">
                 {[{id:'daily', label:'排班管理'},{id:'timetable', label:'仕業表'},{id:'monthly', label:'全月查詢'}].map(tab => (
