@@ -265,7 +265,8 @@
         const TIMELINE_TOTAL_MINS = 1440 - 330;
         const pixelsPerMin = timelineRect.width / TIMELINE_TOTAL_MINS;
         const deltaX = e.clientX - draggingTrip.initialMouseX;
-        const snappedDeltaMins = Math.round((deltaX / pixelsPerMin) / 5) * 5;
+        // 調整吸附尺度為 1 分鐘 (原本為 5 分鐘)
+        const snappedDeltaMins = Math.round(deltaX / pixelsPerMin);
         let newStartMins = draggingTrip.initialStartMins + snappedDeltaMins;
         setDailyTrips(prev => prev.map(row => {
           if (row.rowId !== draggingTrip.rowId) return row;
