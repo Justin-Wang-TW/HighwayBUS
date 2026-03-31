@@ -59,6 +59,12 @@
       return `${String(hours).padStart(2, '0')}:${String(mins).padStart(2, '0')}`;
     };
 
+    const formatDuration = (mins) => {
+      const h = Math.floor(mins / 60);
+      const m = Math.floor(mins % 60);
+      return h > 0 ? `${h}小時${m}分` : `${m}分鐘`;
+    };
+
     const defaultRoutesData = [
       { id: 'douliu', name: '斗六線', duration: 23, destRestMins: 5 }, 
       { id: 'minxiong', name: '民雄線', duration: 51, destRestMins: 15 },
@@ -226,15 +232,17 @@
           });
           const isOutstationStart = trips.length > 0 ? trips[0].direction === 'inbound' : false;
           const isOutstationEnd = trips.length > 0 ? trips[trips.length - 1].direction === 'outbound' : false;
+          
+          let totalWorkMins = 0;
           if (trips.length > 0) {
             const startTime = trips[0].startMins - 15;
             const endTime = trips[trips.length - 1].endMins + 15;
-            const totalWorkMins = endTime - startTime;
+            totalWorkMins = endTime - startTime;
             if (totalWorkMins > 600 && !violations.includes('總工時超10H')) violations.push('總工時超10H');
             if (totalWorkMins > 720) violations.push('總工時超12H');
             if (totalDriveMins > 600) violations.push('純行車超10H');
           }
-          return { ...row, trips, rests, isOutstationStart, isOutstationEnd, violations, isLegal: violations.length === 0 };
+          return { ...row, trips, rests, isOutstationStart, isOutstationEnd, violations, isLegal: violations.length === 0, totalDriveMins, totalWorkMins };
         });
       }, [dailyTrips]);
 
@@ -265,7 +273,6 @@
         const TIMELINE_TOTAL_MINS = 1440 - 330;
         const pixelsPerMin = timelineRect.width / TIMELINE_TOTAL_MINS;
         const deltaX = e.clientX - draggingTrip.initialMouseX;
-        // 調整吸附尺度為 1 分鐘 (原本為 5 分鐘)
         const snappedDeltaMins = Math.round(deltaX / pixelsPerMin);
         let newStartMins = draggingTrip.initialStartMins + snappedDeltaMins;
         setDailyTrips(prev => prev.map(row => {
@@ -293,7 +300,6 @@
         
         return (
           <div className="space-y-6 animate-fadeIn select-none">
-            {/* 工具列 */}
             <div className="flex justify-between items-center bg-white p-4 rounded-xl shadow-sm border border-gray-100 sticky top-0 z-50">
                <div className="flex items-center space-x-3">
                  <button onClick={handleSave} className="px-6 py-2 bg-indigo-600 text-white font-bold rounded-lg hover:bg-indigo-700 transition-all shadow-md">儲存排班</button>
@@ -311,7 +317,6 @@
             </div>
 
             <div className="bg-white rounded-xl shadow-md overflow-hidden border border-gray-200">
-              {/* 圖例說明 */}
               <div className="px-4 py-3 bg-gray-50 border-b flex flex-wrap gap-4 items-center">
                 <span className="text-xs font-bold text-gray-400">圖例：</span>
                 <div className="flex space-x-2 text-[10px] font-bold text-white">
@@ -322,11 +327,8 @@
                 </div>
               </div>
 
-              {/* 核心排班畫布 (支援橫向捲動) */}
               <div className="overflow-x-auto overflow-y-hidden">
                 <div style={{ width: `${zoomScale * 100}%`, minWidth: '100%' }}>
-                  
-                  {/* 時間軸刻度 */}
                   <div className="p-4 border-b border-gray-200 bg-gray-50 flex items-center">
                     <div className="w-32 flex-shrink-0"></div>
                     <div className="flex-1 relative h-8 ml-4" ref={timelineRef}>
@@ -347,17 +349,13 @@
                             <div className="font-bold text-gray-700 text-xs truncate">{row.busId}</div>
                             <div className={`text-[9px] font-bold ${row.driverType === '早班' ? 'text-blue-500' : 'text-indigo-500'}`}>{row.driverType}</div>
                           </div>
-                          
                           <div className="flex-1 relative h-10 bg-gray-50/40 rounded border border-dashed border-gray-200 ml-4">
-                            {/* 整備區塊 */}
                             {row.trips.length > 0 && (
                               <div className="absolute h-8 top-1 bg-yellow-400 flex items-center justify-center rounded-l shadow-sm z-10"
                                    style={{ left: `${((row.trips[0].startMins - 15 - TIMELINE_START) / TIMELINE_TOTAL) * 100}%`, width: `${(15 / TIMELINE_TOTAL) * 100}%` }}>
                                 <span className="font-bold text-[8px] text-yellow-900">P</span>
                               </div>
                             )}
-
-                            {/* 休息區塊 */}
                             {row.rests.map((rest, idx) => (
                               <div key={`rest-${idx}`} className={`absolute h-8 top-1 flex items-center justify-center opacity-80 group/rest ${rest.type === 'large' ? 'bg-emerald-700 text-white' : 'bg-lime-500 text-lime-900'}`}
                                    style={{ left: `${((rest.startMins - TIMELINE_START) / TIMELINE_TOTAL) * 100}%`, width: `${(rest.duration / TIMELINE_TOTAL) * 100}%` }}>
@@ -369,8 +367,6 @@
                                 </div>
                               </div>
                             ))}
-
-                            {/* 單程班次 */}
                             {row.trips.map((trip) => {
                               const leftPercent = ((trip.startMins - TIMELINE_START) / TIMELINE_TOTAL) * 100;
                               const widthPercent = (trip.duration / TIMELINE_TOTAL) * 100;
@@ -380,10 +376,7 @@
                                 <div key={trip.tripId} onMouseDown={(e) => handleMouseDown(e, row.rowId, trip.tripId, trip.startMins)} 
                                      className={`absolute h-8 top-1 flex rounded shadow text-white cursor-move group/trip ${bgColor} ${isDragging ? 'ring-2 ring-yellow-400 z-50 scale-105 shadow-xl' : 'hover:z-30 hover:brightness-110'}`} 
                                      style={{ left: `${leftPercent}%`, width: `${widthPercent}%` }}>
-                                  <div className="h-full w-full flex items-center justify-center text-[8px] font-bold tracking-tighter truncate px-1">
-                                    {trip.startTimeStr}
-                                  </div>
-                                  {/* Tooltip */}
+                                  <div className="h-full w-full flex items-center justify-center text-[8px] font-bold tracking-tighter truncate px-1">{trip.startTimeStr}</div>
                                   <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover/trip:block z-[100] pointer-events-none">
                                     <div className="bg-gray-900 text-white text-[10px] py-2 px-3 rounded-lg shadow-xl whitespace-nowrap border border-gray-700">
                                       <div className="font-bold mb-1 border-b border-gray-700 pb-1">{trip.direction==='outbound'?'🚀 去程':'🏡 回程'}</div>
@@ -399,8 +392,6 @@
                                 </div>
                               );
                             })}
-
-                            {/* 收班 */}
                             {row.trips.length > 0 && (() => {
                               const lastT = row.trips[row.trips.length - 1];
                               return (
@@ -423,38 +414,52 @@
         );
       };
 
-      const renderTimetableView = () => (
-        <div className="p-6 bg-white rounded-2xl shadow-xl animate-fadeIn">
-          <h2 className="text-2xl font-black mb-6 text-gray-800">今日單程行駛路單</h2>
-          {processedSchedule.map((row) => (
-            <div key={row.rowId} className="mb-8 border-l-4 border-indigo-200 pl-4">
-              <div className="flex justify-between items-center mb-2">
-                <span className="font-black text-lg">{row.busId} ({row.driverType})</span>
-              </div>
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="bg-gray-50 text-gray-500 text-left border-b">
-                    <th className="p-3 font-bold">方向</th><th className="p-3 font-bold">發車</th><th className="p-3 font-bold">抵達</th><th className="p-3 font-bold">備註</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y">
-                  {row.trips.map((trip) => (
-                    <tr key={trip.tripId} className="hover:bg-blue-50/30">
-                      <td className="p-3 font-bold">{trip.direction === 'outbound' ? '小東 → 外站' : '外站 → 小東'}</td>
-                      <td className="p-3 font-mono font-bold text-blue-800">{trip.startTimeStr}</td>
-                      <td className="p-3 font-mono text-gray-600">{trip.endTimeStr}</td>
-                      <td className="p-3 text-[10px]">
-                        {trip.isFirst && <span className="text-orange-500 font-bold mr-2">需整備</span>}
-                        {trip.isLast && <span className="text-orange-500 font-bold">需收班</span>}
-                      </td>
+      const renderTimetableView = () => {
+        const dailyAssignments = rosterData.monthlyRoster[0].assignments;
+        return (
+          <div className="p-6 bg-white rounded-2xl shadow-xl animate-fadeIn">
+            <h2 className="text-2xl font-black mb-6 text-gray-800">今日單程行駛仕業表</h2>
+            {processedSchedule.map((row) => (
+              <div key={row.rowId} className="mb-8 border-l-4 border-indigo-200 pl-4">
+                <div className="flex justify-between items-end mb-2">
+                  <div>
+                    <span className="font-black text-lg">{row.busId} ({row.driverType})</span>
+                    <div className="flex space-x-4 mt-1">
+                       <span className="text-xs bg-blue-50 text-blue-700 px-2 py-0.5 rounded border border-blue-100 font-bold">
+                         行駛總時：{formatDuration(row.totalDriveMins)}
+                       </span>
+                       <span className="text-xs bg-indigo-50 text-indigo-700 px-2 py-0.5 rounded border border-indigo-100 font-bold">
+                         上班總時：{formatDuration(row.totalWorkMins)}
+                       </span>
+                    </div>
+                  </div>
+                  <span className="text-indigo-600 font-bold bg-indigo-50 px-3 py-1 rounded-full text-sm">駕駛：{dailyAssignments[row.rowId]}</span>
+                </div>
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="bg-gray-50 text-gray-500 text-left border-b">
+                      <th className="p-3 font-bold">方向</th><th className="p-3 font-bold">發車</th><th className="p-3 font-bold">抵達</th><th className="p-3 font-bold">備註</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          ))}
-        </div>
-      );
+                  </thead>
+                  <tbody className="divide-y">
+                    {row.trips.map((trip) => (
+                      <tr key={trip.tripId} className="hover:bg-blue-50/30">
+                        <td className="p-3 font-bold">{trip.direction === 'outbound' ? '小東 → 外站' : '外站 → 小東'}</td>
+                        <td className="p-3 font-mono font-bold text-blue-800">{trip.startTimeStr}</td>
+                        <td className="p-3 font-mono text-gray-600">{trip.endTimeStr}</td>
+                        <td className="p-3 text-[10px]">
+                          {trip.isFirst && <span className="text-orange-500 font-bold mr-2">需整備(15m)</span>}
+                          {trip.isLast && <span className="text-orange-500 font-bold">需收班(15m)</span>}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ))}
+          </div>
+        );
+      };
 
       const renderMonthlyView = () => (
         <div className="bg-white rounded-2xl shadow-xl p-6 h-[700px] overflow-auto animate-fadeIn text-sm">
@@ -487,10 +492,10 @@
             <header className="flex justify-between items-center mb-8">
               <div>
                 <h1 className="text-4xl font-black text-gray-800 tracking-tighter">小東轉運站 <span className="text-indigo-600">智慧調度系統</span></h1>
-                <p className="text-gray-500 font-bold mt-1">互動排班 ‧ 單程拆分 ‧ 全月報表</p>
+                <p className="text-gray-500 font-bold mt-1">互動排班 ‧ 仕業表管理 ‧ 全月報表</p>
               </div>
               <div className="flex space-x-2 bg-white p-1.5 rounded-2xl shadow-sm border border-gray-100">
-                {[{id:'daily', label:'排班管理'},{id:'timetable', label:'路單時刻'},{id:'monthly', label:'全月查詢'}].map(tab => (
+                {[{id:'daily', label:'排班管理'},{id:'timetable', label:'仕業表'},{id:'monthly', label:'全月查詢'}].map(tab => (
                   <button key={tab.id} onClick={() => setActiveTab(tab.id)} className={`px-8 py-3 rounded-xl font-black transition-all ${activeTab === tab.id ? 'bg-indigo-600 text-white shadow-lg' : 'text-gray-400 hover:bg-gray-50'}`}>
                     {tab.label}
                   </button>
